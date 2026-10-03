@@ -1,0 +1,2687 @@
+<!doctype html>
+<html>
+<head>
+<meta http-equiv="x-ua-compatible" content="IE=edge">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Services Analyzer</title>
+<HTA:APPLICATION
+  ID="saHta"
+  APPLICATIONNAME="Services Analyzer"
+  BORDER="thick"
+  CAPTION="yes"
+  SCROLL="auto"
+  SINGLEINSTANCE="yes"
+  SHOWINTASKBAR="yes"
+  MAXIMIZEBUTTON="yes"
+  MINIMIZEBUTTON="yes"
+  INNERBORDER="no"
+  CONTEXTMENU="yes"
+  SELECTION="yes" />
+<!--
+  Services-Analyzer - Windows services triage for the DFIR toolkit (github.com/bpmorris22/Services-Analyzer).
+  Every service the SYSTEM hive configures, JOINED to its install history from the System / Security
+  event logs, scored for persistence and remote-execution tradecraft. The join is the point: a service
+  that was installed (7045 / 4697) and is no longer in the hive is a transient / deleted service
+  (PsExec, smbexec, sc-create one-shots) that a hive-only or log-only tool cannot see.
+
+  Engines (both Eric Zimmerman tools, both folder-shaped):
+    RECmd.exe    --bn "<outDir>\ServicesAnalyzer.reb" -f "<SYSTEM>" --csv "<outDir>" [--nl]
+    EvtxECmd.exe -f "<System.evtx>"   --csv "<outDir>" --csvf <stamp>_ServicesAnalyzer_SystemLog.csv   --inc 7045,7040,7034,7031,7030,7023,7024,7000,7009
+    EvtxECmd.exe -f "<Security.evtx>" --csv "<outDir>" --csvf <stamp>_ServicesAnalyzer_SecurityLog.csv --inc 4697
+
+  Output contract VERIFIED 2026-10-03 (RECmd 2.0.0.0, EvtxECmd 1.0.0.0, two real workstation / server collections):
+    <rstamp>_RECmd_Batch_ServicesAnalyzer_Output.csv       batch rows (Select\Current, ComputerName,
+                                                            ObjectName, FailureCommand, ServiceMain)
+    <rstamp>\<rstamp>_Services__SYSTEM.csv                  Services plugin detail, one row per service:
+      Name,BatchKeyPath,Description,BatchValueName,DisplayName,StartMode,ServiceType,NameKeyLastWrite,
+      ParametersKeyLastWrite,Group,ImagePath,ServiceDLL,RequiredPrivileges
+      join key to batch rows = BatchKeyPath + "\" + Name == KeyPath (ROOT\ControlSet001\Services\<Name>)
+    EvtxECmd: RecordNumber,...,EventId,...,Computer,...,UserId,MapDescription,UserName,...,PayloadData1..6,
+      ExecutableInfo,...,Payload   - Payload is JSON {"EventData":{"Data":[{"@Name":..,"#text":..}],"Binary":..}}
+      with XML entities still escaped (&gt; &amp;) - decoded at ingest. 7045 ServiceName is the DISPLAY name
+      when one was supplied; SCM failure events (7024/7031/7034) carry the KEY name UTF-16LE in Binary.
+  RECmd crashes on a bare no-arg run (Console.WindowWidth) - versions are read with --version.
+  Dirty hive without .LOG1/.LOG2: RECmd aborts with no CSV -> the app retries the RECmd step once with --nl.
+-->
+<style>
+  html{margin:0;height:100%;background:#0d1117}
+  body{margin:0;height:100%;background:#0d1117;color:#e6edf3;font-family:Segoe UI,Tahoma,sans-serif;font-size:16px}
+  #content{zoom:0.9;width:111.111%;box-sizing:border-box}   /* zoom<1 shrinks a 100%-wide block below viewport width - widen by 1/zoom in CSS so it fills the window from the first paint (applyZoom keeps it in sync for A-/A+) */
+  a{color:#58a6ff}
+  .mono{font-family:Consolas,"Courier New",monospace}
+  .muted{color:#8b949e}
+  .err{color:#f85149}
+  .ok{color:#3fb950}
+  .warn{color:#e3b341}
+  header{padding:8px 14px;background:#161b22;border-bottom:1px solid #30363d}
+  header h1{display:inline-block;font-size:15px;margin:0;font-weight:600;vertical-align:middle}
+  header h1 small{color:#8b949e;font-weight:400}
+  .pill{display:inline-block;font-size:11px;color:#8b949e;border:1px solid #30363d;border-radius:20px;padding:2px 10px;margin-left:8px;vertical-align:middle}
+  .pill.run{color:#ff8b3d;border-color:#bd561d}     /* orange: a run is in progress */
+  .pill.err{color:#ff8b8b;border-color:#b02020}     /* red: the run timed out / produced nothing */
+  .pill.ok{color:#7ee787;border-color:#2ea043}
+  .pill.bad{color:#ff8b3d;border-color:#bd561d}
+  .wrap{padding:12px 14px}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin-bottom:12px}
+  .card h3{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e}
+  label.fld{display:block;margin:6px 0 2px;font-size:11px;color:#8b949e}
+  input.txt,select,textarea{background:#1c2330;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:5px 8px;font-size:13px;font-family:Consolas,monospace}
+  input.wide{width:62%}
+  .btn{background:#1c2330;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer;margin:2px}
+  .btn:hover{border-color:#58a6ff}
+  .btn.primary{background:#1f6feb;border-color:#1f6feb}
+  .btn.on{background:#1f6feb;border-color:#1f6feb;color:#fff}
+  .btn.sm{padding:3px 9px;font-size:12px}
+  .row{white-space:nowrap}
+  .chiplab{display:inline-block;width:58px;font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.4px}
+  .stat{display:inline-block;background:#1c2330;border:1px solid #30363d;border-radius:8px;padding:6px 12px;margin:0 6px 6px 0;min-width:70px;vertical-align:top}
+  .stat .n{font-size:17px;font-weight:700;display:block}
+  .stat .l{font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+  .cards3{width:100%}
+  .col3{display:inline-block;width:32%;vertical-align:top;margin-right:1%}
+  .brow{white-space:nowrap;margin:3px 0}
+  .blab{display:inline-block;width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;font-family:Consolas,monospace;font-size:11px}
+  .blab.lnk{cursor:pointer;color:#58a6ff}
+  .blab.lnk:hover{text-decoration:underline}
+  .btrack{display:inline-block;width:32%;height:12px;background:#1c2330;border-radius:3px;overflow:hidden;vertical-align:middle}
+  .bfill{display:block;height:100%;background:#1f6feb}
+  .bval{display:inline-block;width:18%;text-align:right;font-size:11px;color:#8b949e;vertical-align:middle}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{text-align:left;padding:4px 7px;border-bottom:1px solid #30363d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  th{background:#1c2330;cursor:pointer;color:#c9d1d9;position:relative;z-index:3;box-shadow:0 1px 0 #30363d}
+  th:hover{color:#58a6ff}
+  .cgrip{position:absolute;top:0;right:-4px;width:8px;height:100%;cursor:col-resize;z-index:6}
+  .cgrip:hover{background:#58a6ff;filter:alpha(opacity=45);opacity:.45}
+  td{max-width:360px}
+  tr.sus td{background:#2a1416}
+  tr.sus td.first{border-left:3px solid #ff6b6b}
+  tr.sel td{background:#1c2f4a}
+  tr.clus td{color:#8b949e;font-style:italic}
+  .scroll{max-height:52vh;overflow:auto;border:1px solid #30363d;border-radius:8px;width:100%;box-sizing:border-box}
+  .tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600;margin-right:3px}
+  .tag.sus{background:#3a1416;color:#ff6b6b}
+  .tag.usr{background:#3a2d10;color:#d29922}
+  .tag.lol{background:#10263f;color:#58a6ff}
+  .tag.rare{background:#241a3a;color:#b083f0}
+  .tag.ioc{background:#3a1416;color:#ff6b6b;border:1px solid #ff6b6b}
+  .tag.gen{background:#21262d;color:#8b949e}
+  .tag.ctx{background:transparent;color:#6e7681;border:1px dashed #30363d;font-weight:400}
+  .tag.cnt{background:#1c2330;color:#c9d1d9;border:1px solid #30363d}
+  .dl{font-family:Consolas,"Courier New",monospace;font-size:11px;max-height:210px;overflow:auto;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px;margin:4px 0;white-space:nowrap;width:100%;box-sizing:border-box}
+  .dl div{overflow:hidden;text-overflow:ellipsis}
+  .hl-user{color:#d29922}
+  .hl-ioc{color:#ff6b6b;font-weight:700}
+  #log{white-space:pre-wrap;font-family:Consolas,monospace;font-size:11px;color:#8b949e;max-height:140px;overflow:auto;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;display:none;margin-top:8px;width:100%;box-sizing:border-box}
+  .hide{display:none !important}   /* must beat later single-class display rules (.maxwarn is inline-block) */
+  .lnk{cursor:pointer;color:#58a6ff}
+  .lnk:hover{text-decoration:underline}
+  .sep{display:inline-block;width:1px;height:18px;background:#30363d;margin:0 6px;vertical-align:middle}
+  .modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.66);z-index:1000;overflow:auto}
+  .modal .mcard{max-width:820px;margin:36px auto;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px 22px}
+  .modal h2{margin:0 0 6px;font-size:18px;font-weight:600}
+  .modal h3{margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e}
+  .modal ul{margin:4px 0;padding-left:20px}.modal li{margin:3px 0;font-size:13px}
+  .modal p{font-size:13px;margin:6px 0}
+  .modal code{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:2px 6px;font-family:Consolas,monospace;font-size:12px}
+  .modal .x{float:right;cursor:pointer;color:#8b949e;font-size:22px;line-height:1}.modal .x:hover{color:#e6edf3}
+  .modal .gh{font-family:Consolas,monospace;font-size:12px}
+  .maxwarn{display:inline-block;color:#e3b341;font-weight:600;cursor:help;border:1px solid #8a7a2a;background:#2a2410;border-radius:10px;padding:1px 8px;font-size:11px;margin-left:6px;vertical-align:middle}
+</style>
+</head>
+<body>
+<header>
+  <h1>Services Analyzer <small>&mdash; Windows services triage (SYSTEM hive + install history)</small></h1>
+  <span class="pill" id="apppill" title="This app's version">app: checking&hellip;</span>
+  <span class="pill" id="verpill" title="RECmd.exe version (SYSTEM hive, Services plugin)">RECmd: checking&hellip;</span>
+  <span class="pill" id="evpill" title="EvtxECmd.exe version (System / Security event logs)">EvtxECmd: checking&hellip;</span>
+  <span class="pill" id="srcpill">no data loaded</span>
+  <span style="float:right">
+    <span class="pill" id="procTimer" title="Processing time. Starts when a run begins and stops when it finishes, so you can see how long the sources actually took to parse. The app is single-threaded, so the counter can pause during a heavy step (a large Security.evtx, a hive replay) and then jump forward - that is the step blocking, not a stall." style="min-width:150px;text-align:center;display:inline-block">Idle</span>
+    <button class="btn" id="instrBtn" onclick="openInstructions()" title="Download the latest Services Analyzer HTML manual from GitHub and open it in your browser">Instructions</button>
+    <button class="btn" id="helpBtn" onclick="openHelp()" title="Help, about &amp; GitHub link">Help</button>
+    <button class="btn primary hide" id="selfUpd" onclick="doSelfUpdate()" title="A newer version is available on GitHub">Update</button>
+    <button class="btn" id="fdown" title="Smaller text">A&minus;</button>
+    <button class="btn" id="fup" title="Larger text">A+</button>
+  </span>
+</header>
+
+<div class="wrap" id="content">
+
+  <!-- CONTROL PANEL -->
+  <div class="card">
+    <h3>Services Analyzer control panel</h3>
+    <div class="muted" id="exeline" style="font-size:11px;margin-bottom:6px"></div>
+    <label class="fld" title="A collection / host folder (searched recursively for config\SYSTEM and winevt\Logs\System.evtx / Security.evtx - KAPE and Velociraptor trees work as-is), a single SYSTEM hive, or a System.evtx / Security.evtx. The three source boxes below are filled in for you; edit any of them before processing.">Input &mdash; a collection / host folder, a SYSTEM hive, or an event log (the sources below are located automatically)</label>
+    <input class="txt wide" id="inPath" value="">
+    <input type="file" id="inPick" style="display:none">
+    <button class="btn" id="browseBtn">Folder&hellip;</button>
+    <button class="btn" id="browseFileBtn">File&hellip;</button>
+    <button class="btn" id="locateBtn" title="Search the input for the SYSTEM hive and the System / Security event logs">Locate sources</button>
+    <div id="hiveSelRow" class="hide">
+      <label class="fld">Several SYSTEM hives found &mdash; pick one (one host per run; newest collection first)</label>
+      <select id="hiveSel" style="min-width:70%"></select>
+    </div>
+    <label class="fld" title="The services configuration: every service + driver, binary, ServiceDLL, run-as account, start mode, key LastWrite. Read with RECmd's Services plugin. Live config hives are exclusively locked - point at a collected copy.">SYSTEM hive &mdash; services configuration (RECmd, Services plugin)</label>
+    <input class="txt wide" id="hivePath" value="">
+    <button class="btn" data-pick="hivePath">Browse&hellip;</button>
+    <label class="fld" title="7045 service installs, 7040 start-type changes, 7031/7034 crashes, 7000/7009/7023/7024/7030 start failures. Optional - without it the run is hive-only.">System.evtx &mdash; installs (7045), start-type changes (7040), crashes / failures &mdash; optional</label>
+    <input class="txt wide" id="sysPath" value="">
+    <button class="btn" data-pick="sysPath">Browse&hellip;</button>
+    <label class="fld" title="4697 service installs - only present where 'Security System Extension' auditing is on, but names the installing account. Optional.">Security.evtx &mdash; installs (4697, names the installing account) &mdash; optional</label>
+    <input class="txt wide" id="secPath" value="">
+    <button class="btn" data-pick="secPath">Browse&hellip;</button>
+    <input type="file" id="srcPick" style="display:none">
+    <label class="fld" title="Required before processing. Guessed from the input path (Collection-<host>-... segments) - overwrite it if the guess is wrong. Cross-checked against the hive's own ComputerName after a run.">Target hostname (required) &mdash; names the output folder _Processed\&lt;host&gt;\Services-Analyzer next to this app</label>
+    <input class="txt" id="hostName" value="" style="width:260px" placeholder="e.g. WORKSTATION-01">
+    <span id="hostWarn" class="maxwarn hide"></span>
+    <label class="fld">CSV output directory</label>
+    <input class="txt wide" id="outDir" value="">
+    <button class="btn" id="openDirBtn">Open folder</button>
+    <div style="margin-top:10px">
+      <button class="btn" id="verBtn">Check versions</button>
+      <button class="btn" id="updBtn">Update / download RECmd</button>
+      <button class="btn" id="updEvBtn">Update / download EvtxECmd</button>
+      <span class="sep"></span>
+      <button class="btn primary" id="procBtn">Process &rarr; analyze</button>
+      <button class="btn" id="loadBtn" title="Load a previous run: any CSV this app produced reloads the whole run (via runinfo.json); other CSVs open in the generic table view.">Load existing run / CSV&hellip;</button>
+      <input type="file" id="csvPick" style="display:none">
+      <span class="sep"></span>
+      <button class="btn" id="logToggle">Show log</button>
+      <span class="muted" id="status" style="margin-left:8px"></span>
+    </div>
+    <div style="margin-top:8px" id="producedRow" class="hide">
+      <label class="fld">Produced CSVs &mdash; pick one to reload (the run's CSVs load together)</label>
+      <select id="producedSel" style="min-width:70%"></select>
+      <button class="btn" id="loadSelBtn">Load selected</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <!-- RESULTS -->
+  <div id="results" class="hide">
+    <div class="card">
+      <h3 id="ovTitle">Overview</h3>
+      <div id="statbar"></div>
+    </div>
+
+    <div class="card cards3 hide" id="pfCards">
+      <div class="col3"><h3>Installs by service (7045 / 4697)</h3><div id="topExes"></div></div>
+      <div class="col3"><h3>Recent lone key writes (LastWrite)</h3><div id="topNew"></div></div>
+      <div class="col3"><h3>Suspicious services</h3><div id="topSus"></div></div>
+    </div>
+
+    <div class="card">
+      <h3 id="tableTitle">Records</h3>
+      <div class="row hide" style="margin-bottom:8px" id="viewToggle">
+        <button class="btn on" id="vSvc" title="One row per service (current control set + services only in another set + services seen only in the event logs), ranked by suspicion score">Services</button>
+        <button class="btn" id="vTime" title="Installs, start-type changes, crashes / failures and service-key writes on one stream, newest first. Bulk key rewrites (servicing) collapse into one row.">Timeline</button>
+        <button class="btn" id="vAcct" title="Grouped per run-as account (ObjectName). Click a group to filter the Services view to it.">Accounts</button>
+      </div>
+      <div class="row hide" style="margin-bottom:6px" id="pfCats">
+        <span class="chiplab">tags</span>
+        <button class="btn sm on" data-cat="all">All</button>
+        <button class="btn sm" data-cat="sus">Suspicious</button>
+        <button class="btn sm" data-cat="IOC">IOC hits</button>
+        <button class="btn sm" data-cat="REMOTE-EXEC">Remote exec</button>
+        <button class="btn sm" data-cat="LOLBIN">LOLBin</button>
+        <button class="btn sm" data-cat="USERPATH">User path</button>
+        <button class="btn sm" data-cat="USER-INSTALL">User install</button>
+        <button class="btn sm" data-cat="DEFENSE-OFF">Defense off</button>
+      </div>
+      <div class="row hide" style="margin-bottom:8px" id="pfFilt">
+        <span class="chiplab">type</span>
+        <button class="btn sm on" data-tf="all">All</button>
+        <button class="btn sm" data-tf="win32">Win32</button>
+        <button class="btn sm" data-tf="driver">Drivers</button>
+        <span class="sep"></span><span class="chiplab">start</span>
+        <button class="btn sm on" data-sf="all">All</button>
+        <button class="btn sm" data-sf="auto">Autostart</button>
+        <button class="btn sm" data-sf="manual">Manual</button>
+        <button class="btn sm" data-sf="disabled">Disabled</button>
+        <span class="sep"></span><span class="chiplab">source</span>
+        <button class="btn sm on" data-rf="all">All</button>
+        <button class="btn sm" data-rf="hive">Hive</button>
+        <button class="btn sm" data-rf="hivelog">Hive+Log</button>
+        <button class="btn sm" data-rf="logonly">Log-only</button>
+      </div>
+      <div class="row" style="margin-bottom:8px">
+        <input class="txt" id="q" placeholder="search all columns&hellip;" style="width:280px">
+        <span id="userWrap" class="hide"><span class="sep"></span><label class="muted" style="font-size:12px">account:</label>
+          <select id="userSel" title="Filter by the service's run-as account (ObjectName in the hive, or the account named by the install event). Native per-row data. Drivers and services with no ObjectName group under (drivers / no account)."><option value="">All accounts</option></select></span>
+        <span id="srcWrap" class="hide"><span class="sep"></span><label class="muted" style="font-size:12px">source:</label>
+          <select id="srcSel" title="Filter by source file."><option value="">all source files</option></select></span>
+        <span id="pfDateCtl" class="hide">
+          <span class="sep"></span>
+          <input class="txt mono" id="dfrom" placeholder="from YYYY-MM-DD" style="width:140px" title="Activity window (UTC): a service passes when its key LastWrite, an install or a start-type change falls inside; Timeline items filter on their own time">
+          <span class="muted">&rarr;</span>
+          <input class="txt mono" id="dto" placeholder="to YYYY-MM-DD" style="width:140px" title="Activity window (UTC): a service passes when its key LastWrite, an install or a start-type change falls inside; Timeline items filter on their own time">
+        </span>
+        <span class="sep"></span>
+        <button class="btn" id="iocBtn">IOC / keywords&hellip;</button>
+        <button class="btn" id="clearBtn">clear</button>
+        <button class="btn" id="exportBtn">Export view &rarr; CSV</button>
+        <button class="btn" id="copyBtn">Copy for case notes</button>
+        <span class="muted" id="count" style="margin-left:8px"></span>
+      </div>
+      <div id="iocWrap" class="hide" style="margin-bottom:8px">
+        <label class="fld">IOC / keyword list &mdash; comma or newline separated; matched (case-insensitive substring) against service name, display name, image path, ServiceDLL, failure command and account. Matches score +3 and light up red in the detail pane.</label>
+        <textarea id="iocBox" rows="3" style="width:70%;vertical-align:top"></textarea>
+        <button class="btn" id="iocApply">Apply</button>
+        <button class="btn" id="iocLoad">Load file&hellip;</button>
+        <input type="file" id="iocPick" style="display:none">
+        <span class="muted" id="iocInfo" style="font-size:11px"></span>
+      </div>
+      <div class="scroll" id="tblScroll"><table id="tbl"></table></div>
+      <div class="muted" id="pfFoot" style="font-size:11px;margin-top:6px">All timestamps UTC. Suspicious rows are shaded (heuristic score &ge; 3 - see Help for every rule). Key LastWrite is NOT install time: servicing rewrites hundreds of service keys in the same second, so those carry a dashed BULK tag and never count as recent. Source: Hive = configured only, Hive+Log = configured and its install was logged, Log-only = installed per 7045 / 4697 but no longer in the hive (transient or deleted). Click a row for every field and the matched events; click an Account cell to filter. Max 6000 rows shown; export writes the full filtered set.</div>
+    </div>
+
+    <div class="card hide" id="detailCard">
+      <h3>Record detail <span class="lnk" id="detCopy" style="float:right;margin-left:12px">copy record</span><span class="lnk" id="detClose" style="float:right">close &times;</span></h3>
+      <div id="detBody"></div>
+    </div>
+  </div>
+
+</div>
+
+<script language="JScript">
+"use strict";
+
+/* boot/error trace (family pattern, from the Artifact-Finder) - survives a crash where the UI can't be
+   seen; overwritten each launch. The headless E2E greps it for ONERROR lines. */
+var BOOTLOG="";
+function bootLog(msg){
+  try{
+    var fso=new ActiveXObject("Scripting.FileSystemObject");
+    if(!BOOTLOG){ var dir="";
+      try{ var lp=decodeURIComponent(location.pathname+"").replace(/^\//,"").replace(/\//g,"\\"); dir=lp.substring(0,lp.lastIndexOf("\\")); }catch(e0){}
+      if(!dir) dir=fso.GetSpecialFolder(2)+"";
+      BOOTLOG=dir+"\\Services-Analyzer.boot.log";
+      var f0=fso.CreateTextFile(BOOTLOG,true); f0.WriteLine(new Date()+" boot"); f0.Close(); }
+    var f=fso.OpenTextFile(BOOTLOG,8,true); f.WriteLine(new Date()+" "+msg); f.Close();
+  }catch(e){}
+}
+window.onerror=function(msg,url,line){ bootLog("ONERROR line "+line+": "+msg); return false; };
+bootLog("script top-level reached");
+
+var APP_VERSION = "0.1.2";
+var APP_NAME = "Services-Analyzer";      // output folder _Processed\<host>\Services-Analyzer (no -Wrapper suffix to strip)
+var KNOWN_LATEST_RECMD = "2026.5.0";     // EZ site CalVer, verified 2026-07-11 (exe --version still banners SemVer 2.0.0.0)
+var RECMD_ZIP_URL = "https://download.ericzimmermanstools.com/RECmd.zip";       // official EZ mirror (net4; family default - folder-shaped tool)
+var EVTX_ZIP_URL = "https://download.ericzimmermanstools.com/EvtxECmd.zip";     // HTTP 200 verified 2026-10-03 (folder-shaped: exe + Maps\)
+var EZ_PAGE = "https://ericzimmerman.github.io/";                              // for live latest-version lookup
+var EXE = "", EXE_DIR = "", LOCAL_VER = "", LATEST_VER = "";                    // RECmd
+var EVX = "", EVX_DIR = "", EVX_VER = "", EVX_LATEST = "";                      // EvtxECmd
+var WEB_OK = false;                  // could we reach the Zimmerman Tools site to check latest?
+var QUERY = "";
+var MAXROWS = 6000;
+/* Row-limit disclosure (family-wide wave): a capped table that merely says "(showing N)" reads
+   as complete to anyone who does not know the cap exists. One consistent amber chip wherever
+   the render cap bites, with the remedy in the tooltip. The DATA is intact - exports always
+   write the FULL filtered set. */
+function maxRowsWarn(shown, total, extra){
+  if(!(total>shown)) return "";
+  return ' <span class="maxwarn" title="'+esc("Drawing the first "+nf(shown)+" of "+nf(total)+" matching rows - the render cap keeps the app responsive; it does NOT mean the rest were discarded. Narrow the view (search box, filters, case date window) to bring what you need inside the cap, or use Export view -> CSV: exports always write the FULL filtered set."+(extra?(" "+extra):""))+'">&#9888; Warning: Maximum Rows Exceeded</span>';
+}
+function copyCapNote(arr){ var total=(arr||[]).length;
+  return total>500 ? (" - first 500 of "+nf(total)+" (clipboard cap); Export view -> CSV writes the full set") : "";
+}
+var LASTOUTDIR = "";
+var LOADED_CSV_DIR = "";             // folder of a standalone-loaded CSV, so exports have a home even with no outDir set
+var qTimer = null;
+var MODE = "svc";                    // "svc" = services analysis, "generic" = raw table
+var VIEW = "svc";                    // svc mode: "svc" = services, "time" = timeline, "acct" = accounts
+var SVCS = [];                       // service records (current set + other-set-only + log-only)
+var TL = [];                         // timeline items
+var META = {};                       // per-load facts (sources, control sets, hive host, log coverage, counts)
+var CURCAT = "all", TYPEF = "all", STARTF = "all", SRCF = "all";
+var DFROM = 0, DTO = 0;
+var SORTKEY = 0, SORTDIR = 1;        // services view: default score desc (col 0 sorts by -score)
+var TSORTKEY = 0, TSORTDIR = -1;     // timeline view: default time desc
+var ASORTKEY = 1, ASORTDIR = -1;     // accounts view: default service count desc
+var IOCS = [];                       // lowercased IOC / keyword terms
+var DETREC = null, DETTL = null;     // record / timeline item currently shown in the detail pane
+var GHEAD = null, GROWS = [], GSRC = "";
+var GSORTKEY = -1, GSORTDIR = 1;
+var GSRCIDX = -1;                    // generic mode: index of the SourceFile(name) column
+var SRCFILTER = "";                  // selected source-file filter (generic mode)
+var USERFILTER = "";                 // selected account filter (family name; svc mode) - acctDisp ("" = all)
+var BUSY = false;                    // a run is in progress
+var PRODUCED = [];
+var DIRTY_NOTE = "";                 // set when the dirty-hive --nl retry kicked in
+var HOST_LOCK = false;               // the CLI outDir named the host - located source paths must not re-guess it
+var PICKTARGET = "";                 // which source box the shared file picker fills
+var HIVE_CANDS = [], LOG_CANDS = {sys:[], sec:[], root:""};
+var RUN = null;                      // in-flight run state
+
+/* ---------- the RECmd batch (embedded - the app stays single-file; written to outDir per run) ----------
+   VERIFIED 2026-10-03 against RECmd 2.0.0.0: the Services plugin row gives the per-service detail CSV;
+   the plugin does NOT emit ObjectName / FailureCommand / ServiceMain, hence the value entries. */
+var REB_NAME = "ServicesAnalyzer.reb";
+var REB_TEXT = [
+  "Description: Services-Analyzer batch",
+  "Author: Services-Analyzer",
+  "Version: 1",
+  "Id: 5e7c1a3e-0f52-4d0b-9a6e-5a11ce5a0002",
+  "Keys:",
+  "    -",
+  "        Description: CurrentControlSet",
+  "        HiveType: SYSTEM",
+  "        Category: Services",
+  "        KeyPath: Select",
+  "        ValueName: Current",
+  "        Recursive: false",
+  "        Comment: \"Which ControlSet00N is current\"",
+  "    -",
+  "        Description: ComputerName",
+  "        HiveType: SYSTEM",
+  "        Category: Services",
+  "        KeyPath: ControlSet00*\\Control\\ComputerName\\ComputerName",
+  "        ValueName: ComputerName",
+  "        Recursive: false",
+  "        Comment: \"Hostname cross-check\"",
+  "    -",
+  "        Description: Services",
+  "        HiveType: SYSTEM",
+  "        Category: Services",
+  "        KeyPath: ControlSet00*\\Services",
+  "        Recursive: false",
+  "        Comment: \"Services plugin\"",
+  "    -",
+  "        Description: Service account",
+  "        HiveType: SYSTEM",
+  "        Category: Services",
+  "        KeyPath: ControlSet00*\\Services\\*",
+  "        ValueName: ObjectName",
+  "        Recursive: false",
+  "        Comment: \"Run-as account\"",
+  "    -",
+  "        Description: Service failure command",
+  "        HiveType: SYSTEM",
+  "        Category: Services",
+  "        KeyPath: ControlSet00*\\Services\\*",
+  "        ValueName: FailureCommand",
+  "        Recursive: false",
+  "        Comment: \"Recovery program\"",
+  "    -",
+  "        Description: Service main",
+  "        HiveType: SYSTEM",
+  "        Category: Services",
+  "        KeyPath: ControlSet00*\\Services\\*\\Parameters",
+  "        ValueName: ServiceMain",
+  "        Recursive: false",
+  "        Comment: \"Non-default ServiceMain export\"",
+  ""
+].join("\r\n");
+var SYS_IDS = "7045,7040,7034,7031,7030,7023,7024,7000,7009";   // no --sd/--ed even with a case window: the join needs the whole log
+
+/* ---------- suspicion knobs (SPEC section 7; sus threshold score >= 3) ---------- */
+var USERPATHS = ["\\users\\","\\appdata\\","\\temp\\","\\downloads\\","\\programdata\\","\\perflogs\\","\\windows\\temp\\","\\$recycle.bin\\","\\public\\"];
+var LOLBINS = {"cmd.exe":1,"powershell.exe":1,"pwsh.exe":1,"mshta.exe":1,"wscript.exe":1,"cscript.exe":1,"regsvr32.exe":1,"rundll32.exe":1,
+  "msiexec.exe":1,"certutil.exe":1,"bitsadmin.exe":1,"java.exe":1,"javaw.exe":1,"node.exe":1,"python.exe":1,"pythonw.exe":1};
+/* remote-exec tradecraft in a service command line: loopback / %COMPUTERNAME% UNC, admin shares, smbexec's
+   "cmd /Q /c echo ... > \\host\C$\__output ... & ... & del", encoded PowerShell */
+var REMOTE_EXEC_RE = /\\\\(127\.0\.0\.1|localhost|%computername%)\\|\badmin\$|\\c\$\\__|\/q\s+\/c\b|\becho\b[^&]{0,200}>[^&]{0,200}&[^&]{0,300}&\s*del\b|\s[\-\/](e|ec|enc|encodedcommand)\s+[a-z0-9+\/=]{20,}/i;
+var TOOLNAME_RE = /^(psexesvc|paexec.*|remcom.*|csexec.*|winexesvc|btobto)$/i;
+var DEFENSE_SVCS = {"windefend":1,"wdnissvc":1,"sense":1,"securityhealthservice":1,"wscsvc":1,"mpssvc":1,"eventlog":1,"sysmon":1,"sysmon64":1};
+var OK_ACCOUNT_RE = /^(\.\\)?(localsystem|nt authority\\.*|nt service\\.*|\\driver\\.*|\\filesystem\\.*)$/i;
+var SYS_SIDS = {"S-1-5-18":1,"S-1-5-19":1,"S-1-5-20":1};
+var WK_SIDS = {"S-1-5-18":"SYSTEM","S-1-5-19":"LOCAL SERVICE","S-1-5-20":"NETWORK SERVICE"};
+var BULK_N = 10, BULK_MS = 2000, RECENT_DAYS = 30;   // BULK: >=10 service keys written within +-2 s of each other
+
+/* ---------- tiny helpers ---------- */
+function $(id){ return document.getElementById(id); }
+function esc(s){ if(s==null) return ""; s=String(s);
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function nf(n){ n=String(n); var dot=n.indexOf("."); var dec=""; if(dot>=0){ dec=n.substring(dot); n=n.substring(0,dot); }
+  var r="",c=0; for(var k=n.length-1;k>=0;k--){ r=n.charAt(k)+r; c++; if(c%3===0&&k>0) r=","+r; } return r+dec; }
+function setStatus(msg,cls){ var el=$("status"); el.innerHTML=esc(msg); el.className=cls||"muted";
+  if(!/elapsed|\d+s$/.test(msg)) bootLog("status["+(cls||"muted")+"] "+msg); }   // status trail in the boot log (ticker lines skipped) - makes headless /auto runs diagnosable
+function appendLog(t){ var el=$("log"); if(el.getAttribute("data-ph")==="1"){ el.innerHTML=""; el.setAttribute("data-ph","0"); }
+  el.style.display="block"; $("logToggle").innerHTML="Hide log"; el.innerHTML+=esc(t)+"\n"; el.scrollTop=el.scrollHeight; }
+function trimStr(s){ return String(s).replace(/^\s+|\s+$/g,""); }
+function baseName(p){ if(!p) return ""; p=String(p); var i=Math.max(p.lastIndexOf("\\"),p.lastIndexOf("/")); return i>=0?p.substring(i+1):p; }
+function showEl(id,vis){ var e=$(id); if(!e) return; var c=e.className.replace(/\s*\bhide\b/g,"");
+  e.className = vis ? c : (c+" hide"); }
+function msOf(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if(!m) return 0; return Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]); }
+function dayOf(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{2})-(\d{2})/); if(!m) return 0; return Number(m[1]+m[2]+m[3]); }
+function mget(m,k){ k="#"+k; return m.hasOwnProperty(k)?m[k]:null; }   // "#"-prefixed keys: service names like "constructor" never hit Object.prototype
+function mset(m,k,v){ m["#"+k]=v; }
+function byMs(a,b){ return a.ms-b.ms; }
+
+/* ---------- file IO via ActiveX (UTF-8 safe, with network-zone fallback) ----------
+   ADODB.Stream is the proper UTF-8 reader, but when the .hta runs from a NETWORK location
+   (mapped drive / UNC share) mshta assigns it the intranet/internet zone and ADODB refuses
+   every LoadFromFile/SaveToFile with "Safety settings on this computer prohibit accessing a
+   data source on another domain" - regardless of where the target file lives. FSO is not
+   zone-checked, so we fall back to ANSI file IO: CSV structure is unaffected (all-ASCII), only
+   rare non-ASCII chars display mojibake'd. Best fidelity = run locally. */
+var FILE_IO="adodb";                 // flips to "fso" permanently on the first zone-policy block
+function zoneNote(){
+  appendLog("NOTE: this app is running from a network location, so Windows zone policy blocks the UTF-8 file reader (ADODB.Stream). Falling back to ANSI file IO - everything works, but non-ASCII characters may display incorrectly. For full fidelity copy this folder to a LOCAL path (e.g. C:\\Tools\\Services-Analyzer) and run it from there.");
+}
+function readUtf8(path){
+  if(FILE_IO==="adodb"){
+    try{
+      // ReadText(-1) on a large file is quadratic in MSHTML (30s for 16MB); read in 64KB chunks (~0.1s).
+      var st=new ActiveXObject("ADODB.Stream");
+      st.Type=2; st.Charset="utf-8"; st.Open(); st.LoadFromFile(path);
+      var parts=[]; while(!st.EOS){ parts.push(st.ReadText(65536)); } st.Close();
+      return parts.join("");
+    }catch(e){
+      if(!/safety settings|data source/i.test(e.message||"")) throw e;   // real IO errors propagate
+      FILE_IO="fso"; zoneNote();
+    }
+  }
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var f=fso.OpenTextFile(path,1,false,0), out=f.ReadAll(); f.Close();
+  // a UTF-8 BOM read as ANSI shows up as three cp1252 chars - strip it
+  if(out.length>=3 && out.charCodeAt(0)===239 && out.charCodeAt(1)===187 && out.charCodeAt(2)===191) out=out.substring(3);
+  return out;
+}
+function writeUtf8(path,text){
+  if(FILE_IO==="adodb"){
+    try{
+      var st=new ActiveXObject("ADODB.Stream");
+      st.Type=2; st.Charset="utf-8"; st.Open(); st.WriteText(text); st.SaveToFile(path,2); st.Close();
+      return;
+    }catch(e){
+      if(!/safety settings|data source/i.test(e.message||"")) throw e;
+      FILE_IO="fso"; zoneNote();
+    }
+  }
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var f=fso.CreateTextFile(path,true,false); f.Write(text); f.Close();
+}
+/* plain ASCII write (no BOM) - the .reb batch goes to RECmd's YAML reader, which must not see a UTF-8 BOM */
+function writeAscii(path,text){ var fso=new ActiveXObject("Scripting.FileSystemObject"); var f=fso.CreateTextFile(path,true,false); f.Write(text); f.Close(); }
+/* FSO CreateFolder is single-level - walk up and create every missing parent */
+function ensureDir(p){
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  p=String(p).replace(/[\\\/]+$/,"");
+  if(!p || fso.FolderExists(p)) return true;
+  var par=parentDir(p);
+  if(par && par!==p && !fso.FolderExists(par)) ensureDir(par);
+  try{ fso.CreateFolder(p); }catch(e){}
+  return fso.FolderExists(p);
+}
+function uid(){ return new Date().getTime()+""+Math.floor(Math.random()*100000); }
+/* cmd expands %N / %VAR% inside .bat lines even within quotes - Velociraptor trees contain literal % (C%3A) */
+function batEsc(s){ return String(s).replace(/%/g,"%%"); }
+/* A path ending in a backslash (e.g. a drive root "E:\" from the folder picker) makes the closing
+   quote in  -f "E:\"  an escaped quote to CommandLineToArgvW, mangling argv. Append "." so the
+   argument resolves to the same folder but no longer ends in a backslash. */
+function argSafePath(s){ s=String(s); return /\\$/.test(s) ? (s+".") : s; }
+
+/* Run a batch script, wait, return {rc, log}. show=true -> visible console window. */
+function runBat(lines, show){
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var sh=new ActiveXObject("WScript.Shell");
+  var tmp=fso.GetSpecialFolder(2)+"";
+  var stamp=uid();
+  var bat=tmp+"\\svcan_"+stamp+".bat";
+  var logp=tmp+"\\svcan_"+stamp+".log";
+  var f=fso.CreateTextFile(bat,true);
+  f.WriteLine("@echo off");
+  for(var i=0;i<lines.length;i++){ f.WriteLine(lines[i].replace(/__LOG__/g,logp)); }
+  f.Close();
+  var rc=sh.Run('cmd /c ""'+bat+'""', show?1:0, true);
+  var txt="";
+  try{ if(fso.FileExists(logp)) txt=readUtf8(logp); }catch(e){ txt="(could not read log: "+e.message+")"; }
+  try{ fso.DeleteFile(bat); }catch(e2){}
+  try{ if(fso.FileExists(logp)) fso.DeleteFile(logp); }catch(e3){}
+  return { rc:rc, log:txt };
+}
+
+/* ---------- processing-time pill (ported from vSphere Support Bundle Analyzer) ----------
+   Idle, an orange live counter while the tools run, and a final green "Processing time mm:ss" (red
+   if the watchdog gave up waiting). The HTA is single-threaded, so the counter can freeze during a
+   blocking step and then jump; the pill tooltip says so rather than letting it look broken. */
+var PROC_T0=0, PROC_TIMER=null, PROC_WHAT="Processing";
+function procFmt(s){ var m=Math.floor(s/60), ss=s%60; return (m<10?"0":"")+m+":"+(ss<10?"0":"")+ss; }
+function procStart(what){
+  PROC_WHAT=what||"Processing";
+  PROC_T0=(new Date()).getTime();
+  if(PROC_TIMER) window.clearInterval(PROC_TIMER);
+  PROC_TIMER=window.setInterval(procTick,500);
+  var el=$("procTimer"); if(el){ el.className="pill run"; el.innerHTML=PROC_WHAT+" 00:00"; }
+}
+function procTick(){ if(!PROC_T0) return; var el=$("procTimer"); if(!el) return;
+  el.innerHTML=PROC_WHAT+" "+procFmt(Math.floor(((new Date()).getTime()-PROC_T0)/1000)); }
+function procStop(ok){
+  if(PROC_TIMER){ window.clearInterval(PROC_TIMER); PROC_TIMER=null; }
+  if(!PROC_T0) return;
+  var s=Math.floor(((new Date()).getTime()-PROC_T0)/1000), el=$("procTimer");
+  if(el){ el.className=(ok===false?"pill err":"pill ok"); el.innerHTML="Processing time "+procFmt(s); }
+  PROC_T0=0;
+}
+/* the run finished but produced nothing usable - recolour the stopped pill so the header agrees
+   with the error in the status line instead of showing a reassuring green time. */
+function procFail(){ var el=$("procTimer"); if(el && !PROC_T0) el.className="pill err"; }
+
+/* Run a batch NON-blocking; writes a .done marker when finished. Caller polls with pollDone().
+   This keeps the HTA script responsive (no MSHTML long-running-script watchdog). */
+function runBatAsync(lines, show){
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var sh=new ActiveXObject("WScript.Shell");
+  var tmp=fso.GetSpecialFolder(2)+"";
+  var stamp=uid();
+  var bat=tmp+"\\svcan_"+stamp+".bat";
+  var logp=tmp+"\\svcan_"+stamp+".log";
+  var donep=tmp+"\\svcan_"+stamp+".done";
+  var f=fso.CreateTextFile(bat,true);
+  f.WriteLine("@echo off");
+  for(var i=0;i<lines.length;i++){ f.WriteLine(lines[i].replace(/__LOG__/g,logp)); }
+  f.WriteLine('echo done> "'+donep+'"');   // marker written after everything above completes
+  f.Close();
+  sh.Run('cmd /c ""'+bat+'""', show?1:0, false);   // false = do NOT block the script
+  return { bat:bat, log:logp, done:donep, stamp:stamp, elapsed:0, graceSecs:10 };
+}
+function procAliveByTag(tag){
+  try{
+    var w=GetObject("winmgmts:\\\\.\\root\\cimv2");
+    var items=w.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE CommandLine LIKE '%svcan_"+tag+"%'");
+    return items.Count>0;
+  }catch(e){ return true; }   // WMI unavailable -> assume alive, so we never end a run early on error
+}
+function pollDone(ctx){
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var grace=ctx.graceSecs||10;
+  var finished=fso.FileExists(ctx.done);
+  if(!finished && ctx.elapsed>=grace && ctx.stamp && !procAliveByTag(ctx.stamp)) finished=true;   // worker gone but .done sentinel lost -> still complete (recovers finished runs)
+  if(finished){
+    var log=""; try{ if(fso.FileExists(ctx.log)) log=readUtf8(ctx.log); }catch(e){ log="(could not read log: "+e.message+")"; }
+    try{ fso.DeleteFile(ctx.bat); }catch(e1){}
+    try{ fso.DeleteFile(ctx.done); }catch(e2){}
+    try{ if(fso.FileExists(ctx.log)) fso.DeleteFile(ctx.log); }catch(e3){}
+    if(ctx.procTimed) procStop(true);
+    ctx.onDone(log);
+    return;
+  }
+  ctx.elapsed+=1;
+  if(ctx.elapsed>1800){ if(ctx.procTimed) procStop(false); if(ctx.onTimeout) ctx.onTimeout(); return; }   // 30-min safety cap
+  if(ctx.onTick) ctx.onTick(ctx.elapsed);
+  window.setTimeout(function(){ pollDone(ctx); }, 1000);
+}
+
+/* ---------- source-file filter (generic mode) + account filter (svc mode) ---------- */
+function distinctVals(arr){ var seen={}, out=[]; for(var i=0;i<arr.length;i++){ var v=arr[i]; if(v!=null && v!=="" && !seen.hasOwnProperty("#"+v)){ seen["#"+v]=1; out.push(v); } } return out; }
+function shortPathN(p,n){ p=String(p); var parts=p.split("\\"); if(parts.length<=n) return p; return "\u2026\\"+parts.slice(parts.length-n).join("\\"); }
+function shortPath(p){ return shortPathN(p,4); }
+function populateSourceFilter(vals){
+  var sel=$("srcSel"); sel.innerHTML="";
+  var o0=document.createElement("option"); o0.value=""; o0.text="all source files ("+vals.length+")"; sel.add(o0);
+  vals=vals.slice(0).sort();
+  for(var i=0;i<vals.length;i++){ var o=document.createElement("option"); o.value=vals[i]; o.text=shortPath(vals[i]); sel.add(o); }
+  SRCFILTER=""; sel.value="";
+  showEl("srcWrap", vals.length>1);
+}
+/* account filter - the family user-filter names (USERFILTER / populateUserFilter / #userWrap / #userSel),
+   Native semantics: the service's own run-as account (ObjectName), blank -> "(drivers / no account)" */
+function populateUserFilter(vals){
+  var sel=$("userSel"); if(!sel) return;
+  var prev=USERFILTER, found=false;
+  sel.innerHTML="";
+  var o0=document.createElement("option"); o0.value=""; o0.text="All accounts ("+vals.length+")"; sel.add(o0);
+  vals=vals.slice(0).sort();
+  for(var i=0;i<vals.length;i++){ var o=document.createElement("option"); o.value=vals[i]; o.text=vals[i]; sel.add(o);
+    if(vals[i]===prev) found=true; }
+  if(prev&&found){ sel.value=prev; } else { USERFILTER=""; sel.value=""; }
+  showEl("userWrap", vals.length>1);
+}
+
+/* ---------- tooling: locate / version / download (two folder-shaped EZ tools) ---------- */
+function fileExists(p){ try{ return new ActiveXObject("Scripting.FileSystemObject").FileExists(p); }catch(e){ return false; } }
+function folderExists(p){ try{ return new ActiveXObject("Scripting.FileSystemObject").FolderExists(p); }catch(e){ return false; } }
+function parentDir(p){ var i=String(p).lastIndexOf("\\"); return i>=0?String(p).substring(0,i):String(p); }
+function htaFolder(){
+  try{ var cl=saHta.commandLine+""; var m=cl.match(/"([^"]+\.hta)"/i); if(!m) m=cl.match(/([A-Za-z]:\\[^"]+\.hta)/i);
+    if(m) return parentDir(m[1]); }catch(e){}
+  try{ var p=decodeURIComponent(location.pathname+"").replace(/^\//,"").replace(/\//g,"\\"); return parentDir(p); }catch(e2){}
+  return "";
+}
+function firstExisting(c){ for(var i=0;i<c.length;i++){ if(fileExists(c[i])) return c[i]; } return ""; }
+/* the C:\ZimmermanTools paths are where this workstation keeps the EZ suite (checked 2026-10-03);
+   a tool folder next to the .hta always wins (self-contained toolkit) */
+function resolveExe(){
+  var dir=htaFolder(), c=[];
+  if(dir){ c.push(dir+"\\RECmd\\RECmd.exe"); c.push(dir+"\\RECmd.exe"); }
+  c.push("C:\\ZimmermanTools\\net6\\RECmd\\RECmd.exe"); c.push("C:\\ZimmermanTools\\RECmd\\RECmd.exe");
+  EXE=firstExisting(c); EXE_DIR=EXE?parentDir(EXE):(dir||""); return !!EXE;
+}
+function resolveEvx(){
+  var dir=htaFolder(), c=[];
+  if(dir){ c.push(dir+"\\EvtxECmd\\EvtxECmd.exe"); c.push(dir+"\\EvtxECmd.exe"); }
+  c.push("C:\\ZimmermanTools\\net6\\EvtxeCmd\\EvtxECmd.exe"); c.push("C:\\ZimmermanTools\\EvtxECmd\\EvtxECmd.exe");
+  EVX=firstExisting(c); EVX_DIR=EVX?parentDir(EVX):(dir||""); return !!EVX;
+}
+function servicesPluginOk(){ return !!EXE_DIR && fileExists(EXE_DIR+"\\Plugins\\RegistryPlugin.Services.dll"); }
+function checkDeps(){
+  var miss=[];
+  if(!EXE_DIR) return ["(install folder unknown)"];
+  if(!folderExists(EXE_DIR+"\\Plugins")) miss.push("Plugins\\ folder");
+  else if(!servicesPluginOk()) miss.push("Plugins\\RegistryPlugin.Services.dll");
+  if(fileExists(EXE_DIR+"\\RECmd.runtimeconfig.json") && !fileExists(EXE_DIR+"\\RECmd.dll")) miss.push("RECmd.dll");
+  return miss;
+}
+function evxMapsDir(){ return (EVX_DIR && folderExists(EVX_DIR+"\\Maps")) ? (EVX_DIR+"\\Maps") : ""; }
+function verTuple(v){ var p=String(v).split("."); var a=[]; for(var i=0;i<p.length;i++) a.push(parseInt(p[i],10)||0); return a; }
+function verCmp(a,b){ a=verTuple(a); b=verTuple(b); var n=Math.max(a.length,b.length);
+  for(var i=0;i<n;i++){ var x=a[i]||0,y=b[i]||0; if(x!==y) return x<y?-1:1; } return 0; }
+/* EZ Tools' site lists CalVer versions (e.g. RECmd 2026.5.0) while the exe --version banner still
+   reports SemVer (2.0.0.0). Treat an obviously-CalVer latest (major >= 2000) vs an obviously-SemVer
+   local (major in 1..99) as "not comparable" so we neither nag nor claim we're behind. */
+function verSchemeMismatch(local,latest){ var lm=verTuple(local)[0]||0, sm=verTuple(latest)[0]||0;
+  return sm>=2000 && lm>=1 && lm<100; }
+function fetchLatest(){
+  LATEST_VER=KNOWN_LATEST_RECMD; EVX_LATEST=""; WEB_OK=false;
+  try{
+    var x=new ActiveXObject("MSXML2.ServerXMLHTTP.6.0");
+    x.setTimeouts(2000,3000,4000,4000);
+    x.open("GET", EZ_PAGE, false); x.send();
+    if(x.status===200){ WEB_OK=true; var t=x.responseText+"";
+      var m=t.match(/RECmd[\s\S]{0,800}?(\d+\.\d+\.\d+(?:\.\d+)?)/i); if(m) LATEST_VER=m[1];
+      var m2=t.match(/EvtxECmd[\s\S]{0,800}?(\d+\.\d+\.\d+(?:\.\d+)?)/i); if(m2) EVX_LATEST=m2[1]; }
+  }catch(e){ WEB_OK=false; }
+}
+/* exe pill: green=present/current, orange=comparable newer exists, grey=not found */
+function paintPill(id,label,local,latest,missingTitle){
+  var p=$(id); if(!p) return;
+  if(!local){ p.className="pill"; p.innerHTML=esc(label)+": not found"; p.title=missingTitle; return; }
+  var outdated = WEB_OK && latest && !verSchemeMismatch(local,latest) && verCmp(local,latest)<0;
+  if(outdated){ p.className="pill bad"; p.innerHTML=esc(label)+" v"+esc(local)+" &middot; update v"+esc(latest);
+    p.title="A newer "+label+" (v"+latest+") is on the Zimmerman Tools site - use its update button."; return; }
+  p.className="pill ok"; p.innerHTML=esc(label)+" v"+esc(local);
+  p.title = !WEB_OK ? "Present and working. Couldn't reach the Zimmerman Tools site to check for a newer version."
+    : ((latest && verSchemeMismatch(local,latest))
+        ? ("Present. Site lists v"+latest+" (CalVer) vs the exe banner v"+local+" (SemVer) - different schemes, not comparable, so no bogus update is forced.")
+        : "Present (no comparable newer version listed).");
+}
+function updateVerPill(){ paintPill("verpill","RECmd",LOCAL_VER,LATEST_VER,"RECmd.exe is not next to this app or in C:\\ZimmermanTools - use 'Update / download RECmd'. Required for the SYSTEM hive."); }
+function updateEvPill(){ paintPill("evpill","EvtxECmd",EVX_VER,EVX_LATEST,"EvtxECmd.exe is not next to this app or in C:\\ZimmermanTools - without it runs are hive-only. Use 'Update / download EvtxECmd'."); }
+function renderExeLine(){
+  var dir=htaFolder(), h="";
+  h+= EXE ? ("RECmd: "+esc(EXE)) : ('<span class="err">RECmd.exe not found ('+esc(dir||"app folder")+'\\RECmd\\ or C:\\ZimmermanTools)</span>');
+  h+="  &middot;  ";
+  h+= EVX ? ("EvtxECmd: "+esc(EVX)) : ('<span class="warn">EvtxECmd.exe not found ('+esc(dir||"app folder")+'\\EvtxECmd\\ or C:\\ZimmermanTools) - runs will be hive-only</span>');
+  h+="  &middot;  run with DOTNET_ROLL_FORWARD=Major (covers newer-.NET-target builds)";
+  $("exeline").innerHTML=h;
+}
+function toolSpec(which){
+  return which==="evx" ? {name:"EvtxECmd", url:EVTX_ZIP_URL, exe:"EvtxECmd.exe", sub:"EvtxECmd", extra:"Maps\\", what:"System / Security event logs"}
+                       : {name:"RECmd", url:RECMD_ZIP_URL, exe:"RECmd.exe", sub:"RECmd", extra:"Plugins\\ + BatchExamples\\", what:"SYSTEM hive"};
+}
+function toolListText(list){ var out=[]; for(var i=0;i<list.length;i++){ var t=toolSpec(list[i]);
+  out.push("  "+t.name+" ("+t.what+")"+(list[i]==="evx"?(EVX_LATEST?(" - v"+EVX_LATEST):""):(" - v"+(LATEST_VER||KNOWN_LATEST_RECMD)))); } return out.join("\n"); }
+function evaluateTooling(promptIfNeeded){
+  var dir=htaFolder();
+  var recLocal = dir ? (fileExists(dir+"\\RECmd\\RECmd.exe")||fileExists(dir+"\\RECmd.exe")) : false;   // tool folders next to the .hta (self-contained)
+  var evLocal = dir ? (fileExists(dir+"\\EvtxECmd\\EvtxECmd.exe")||fileExists(dir+"\\EvtxECmd.exe")) : false;
+  var rf=resolveExe(), ef=resolveEvx();
+  renderExeLine();
+  if(rf) checkVersion(true); else LOCAL_VER="";
+  if(ef) checkEvxVersion(true); else EVX_VER="";
+  fetchLatest(); updateVerPill(); updateEvPill();
+  if(rf){ var miss=checkDeps();
+    if(miss.length) setStatus("RECmd support files missing next to the exe: "+miss.join(", ")+" - the Services plugin is required for the hive.","err");
+    else setStatus("RECmd v"+(LOCAL_VER||"?")+(ef?(" \u00b7 EvtxECmd v"+(EVX_VER||"?")):" \u00b7 EvtxECmd not found (hive-only runs)"), ef?"ok":"muted"); }
+  if(!promptIfNeeded) return;
+  var need=[];
+  if(!recLocal) need.push("rec");
+  if(!evLocal) need.push("evx");
+  if(!need.length){
+    // tools already next to the .hta -> only prompt when the web says a comparable newer version exists
+    var upd=[];
+    if(WEB_OK && LOCAL_VER && !verSchemeMismatch(LOCAL_VER,LATEST_VER) && verCmp(LOCAL_VER,LATEST_VER)<0) upd.push("rec");
+    if(WEB_OK && EVX_VER && EVX_LATEST && !verSchemeMismatch(EVX_VER,EVX_LATEST) && verCmp(EVX_VER,EVX_LATEST)<0) upd.push("evx");
+    if(upd.length && confirm("Newer Zimmerman tools are available:\n\n"+toolListText(upd)+"\n\nDownload the update(s) next to the app now?")) downloadTools(upd,null);
+    return;
+  }
+  if(WEB_OK){
+    var using=[]; if(rf && !recLocal) using.push(EXE); if(ef && !evLocal) using.push(EVX);
+    var msg="Not set up next to this app:\n\n"+toolListText(need)+"\n\n"+(using.length?("Currently using:\n  "+using.join("\n  ")+"\n\n"):"")
+      +"Download the latest into "+(dir||"?")+"\\<tool>\\ now (whole tool folders, incl. Plugins / Maps)?";
+    if(confirm(msg)) downloadTools(need,null);
+  } else if(!rf){
+    setStatus("RECmd.exe not found and no internet to download it. Place the RECmd folder (RECmd.exe + Plugins\\) next to this .hta.","err");
+  }
+}
+function askDownload(which){
+  var t=toolSpec(which), target=(htaFolder()||"?")+"\\"+t.sub;
+  var latest = which==="evx" ? (EVX_LATEST||"latest") : (LATEST_VER||KNOWN_LATEST_RECMD);
+  if(!confirm((WEB_OK?"":"The Zimmerman Tools site did not respond earlier (no internet?).\n\n")+"Download "+t.name+" (v"+latest+") from:\n"+t.url
+    +"\n\nInstall the whole "+t.name+" folder (exe + "+t.extra+") next to the app into:\n"+target+"\n\nProceed?")) return;
+  downloadTool(which, null);
+}
+function downloadTool(which, done){   // done(ok): fired after install
+  var t=toolSpec(which), base=htaFolder();
+  if(!base){ setStatus("Cannot determine the app folder to install into","err"); if(done) done(false); return; }
+  var target=base+"\\"+t.sub;   // the WHOLE tool folder lands next to the .hta
+  setStatus("Downloading & installing "+t.name+"\u2026 (give it a moment)","muted");
+  var tq=String(target).replace(/'/g,"''");
+  var ps="$ErrorActionPreference='Stop';"
+    +"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
+    +"$u='"+t.url+"';"
+    +"$z=Join-Path $env:TEMP '"+t.name+"_dl.zip';"
+    +"$x=Join-Path $env:TEMP ('"+t.name+"_x_'+[guid]::NewGuid().ToString('N'));"
+    +"Invoke-WebRequest -Uri $u -OutFile $z;"
+    +"Expand-Archive -Force -Path $z -DestinationPath $x;"
+    +"$exe=Get-ChildItem -Path $x -Recurse -Filter "+t.exe+" | Select-Object -First 1;"
+    +"if(-not $exe){throw '"+t.exe+" not found in downloaded archive'};"
+    +"$src=Split-Path $exe.FullName;"
+    +"New-Item -ItemType Directory -Force -Path '"+tq+"' | Out-Null;"
+    +"Copy-Item -Path (Join-Path $src '*') -Destination '"+tq+"' -Recurse -Force;"
+    +"Remove-Item $z,$x -Recurse -Force -ErrorAction SilentlyContinue;"
+    +"Write-Output 'INSTALL_OK'";
+  try{
+    var r=runBat(['powershell -NoProfile -ExecutionPolicy Bypass -Command "'+ps+'" > "__LOG__" 2>&1']);
+    appendLog("--- "+t.name+" download / install ---\n"+r.log);
+    if((r.log+"").indexOf("INSTALL_OK")>=0){ setStatus(t.name+" installed to "+target,"ok"); evaluateTooling(false); if(done) done(true); }
+    else { setStatus(t.name+" download/install failed - see log","err"); if(done) done(false); }
+  }catch(e){ setStatus(t.name+" download failed: "+e.message,"err"); if(done) done(false); }
+}
+function downloadTools(list, done){ var i=0;
+  function next(){ if(i>=list.length){ if(done) done(true); return; } var w=list[i]; i++; downloadTool(w, function(){ next(); }); }
+  next(); }
+/* /auto launch: a missing engine must self-resolve (the Finder fires wrappers unattended). Offline,
+   processRun surfaces the clear "not found" message instead. */
+function autoProcess(){
+  var hive=trimStr($("hivePath").value), logs=!!(trimStr($("sysPath").value)||trimStr($("secPath").value)), need=[];
+  if(hive && !(EXE && fileExists(EXE))) need.push("rec");
+  if(logs && !(EVX && fileExists(EVX))) need.push("evx");
+  if(need.length && WEB_OK){
+    setStatus("Fetching missing tools before this auto run\u2026","muted");
+    appendLog("/auto: missing "+need.join(" + ")+" - fetching before processing");
+    downloadTools(need, function(){ processRun(); });
+    return;
+  }
+  processRun();
+}
+function checkVersion(quiet){
+  if(!EXE || !fileExists(EXE)){ LOCAL_VER=""; updateVerPill(); if(!quiet) setStatus("RECmd.exe not found - use 'Update / download RECmd'","err"); return; }
+  try{
+    // a bare no-arg RECmd run CRASHES (Console.WindowWidth); --version prints just "2.0.0.0"
+    var r=runBat(["set DOTNET_ROLL_FORWARD=Major", '"'+EXE+'" --version > "__LOG__" 2>&1']);
+    var m=r.log.match(/(\d+\.\d+\.\d+(?:\.\d+)?)/);
+    if(m){ LOCAL_VER=m[1]; updateVerPill(); if(!quiet) setStatus("RECmd v"+LOCAL_VER+" detected","ok"); }
+    else { LOCAL_VER=""; updateVerPill(); if(!quiet) setStatus("Ran RECmd but could not parse version - see log","err"); appendLog(r.log); }
+  }catch(e){ LOCAL_VER=""; updateVerPill(); if(!quiet) setStatus("RECmd version check failed: "+e.message,"err"); }
+}
+function checkEvxVersion(quiet){
+  if(!EVX || !fileExists(EVX)){ EVX_VER=""; updateEvPill(); if(!quiet) setStatus("EvtxECmd.exe not found - use 'Update / download EvtxECmd' (runs stay hive-only without it)","err"); return; }
+  try{
+    var r=runBat(["set DOTNET_ROLL_FORWARD=Major", '"'+EVX+'" --version > "__LOG__" 2>&1']);
+    var m=r.log.match(/(\d+\.\d+\.\d+(?:\.\d+)?)/);
+    if(m){ EVX_VER=m[1]; updateEvPill(); if(!quiet) setStatus("EvtxECmd v"+EVX_VER+" detected","ok"); }
+    else { EVX_VER=""; updateEvPill(); if(!quiet) setStatus("Ran EvtxECmd but could not parse version - see log","err"); appendLog(r.log); }
+  }catch(e){ EVX_VER=""; updateEvPill(); if(!quiet) setStatus("EvtxECmd version check failed: "+e.message,"err"); }
+}
+
+/* ---------- target hostname + _Processed output convention (family, 2026-07-06) ----------
+   All processed output lands in <appFolder>\_Processed\<Hostname>\<AppName>\ so the
+   Artifact-Finder (and the operator) can see per-host state at a glance. The hostname field is
+   REQUIRED before processing (not for just viewing CSVs). Guess order: Collection-<host>-<date>
+   segment in the input path -> \_Processed\<host>\ in a CLI-passed outDir -> live-machine paths
+   (X:\Windows / X:\Users -> this computer's name). User-typed values are never overwritten. */
+var HOST_TOUCHED=false, OUT_TOUCHED=false;
+function sanitHost(s){ return String(s).replace(/[^A-Za-z0-9._\-]/g,"-").replace(/^[\-.]+|[\-.]+$/g,""); }
+function guessHost(p){
+  p=String(p||"");
+  var m=p.match(/Collection-([A-Za-z0-9][A-Za-z0-9\-_\.]*?)-\d{4}-\d{2}-\d{2}/i); if(m) return m[1];
+  m=p.match(/[\\\/]_Processed[\\\/]([^\\\/]+)[\\\/]/i); if(m) return m[1];
+  if(/^[a-z]:\\(windows|users)(\\|$)/i.test(p)){ try{ return new ActiveXObject("WScript.Network").ComputerName+""; }catch(e){} }
+  return "";
+}
+function defaultOutDir(){
+  var h=sanitHost($("hostName").value); if(!h) return "";
+  var base=htaFolder(); if(!base){ try{ base=new ActiveXObject("Scripting.FileSystemObject").GetSpecialFolder(2)+""; }catch(e){ return ""; } }
+  return base+"\\_Processed\\"+h+"\\"+APP_NAME;
+}
+function syncOutDir(){ if(OUT_TOUCHED) return; var d=defaultOutDir(); if(d) $("outDir").value=d; }
+function hostGuessFrom(p){
+  if(!HOST_LOCK && (!HOST_TOUCHED || !trimStr($("hostName").value))){ var g=guessHost(p); if(g) $("hostName").value=sanitHost(g); }
+  syncOutDir();
+}
+function requireHost(){
+  var h=sanitHost($("hostName").value);
+  if(!h){ setStatus("Target hostname is required - it names the output folder _Processed\\<host>\\"+APP_NAME+". Type the host these sources came from, then process again.","err");
+    try{ $("hostName").focus(); }catch(e){} return ""; }
+  if(!trimStr($("outDir").value)) syncOutDir();
+  return h;
+}
+
+/* ---------- shared toolkit IOC list (family, 2026-07-06) ----------
+   IOC.txt next to the .hta (the toolkit folder - same file for every wrapper + the
+   Artifact-Finder): one term per line, # comments. Auto-merged into the IOC box at launch
+   (before any /auto run) so one paste covers the whole engagement. */
+function loadToolkitIoc(){
+  try{
+    var base=htaFolder(); if(!base) return;
+    var p=base+"\\IOC.txt";
+    if(!fileExists(p)) return;
+    var parts=String(readUtf8(p)).split(/\r?\n/), add=[], i;
+    for(i=0;i<parts.length;i++){ var s=trimStr(parts[i]); if(s && s.charAt(0)!=="#") add.push(s); }
+    if(!add.length) return;
+    var cur=$("iocBox").value, curL={}, cp=String(cur).split(/[\r\n,;]+/);
+    for(i=0;i<cp.length;i++){ var c=trimStr(cp[i]).toLowerCase(); if(c) curL["#"+c]=1; }
+    var fresh2=[]; for(i=0;i<add.length;i++){ if(!curL.hasOwnProperty("#"+add[i].toLowerCase())) fresh2.push(add[i]); }
+    if(!fresh2.length) return;
+    $("iocBox").value=(trimStr(cur)?(cur.replace(/\s+$/,"")+"\r\n"):"")+fresh2.join("\r\n");
+    applyIocs();
+    appendLog("Toolkit IOC list: merged "+fresh2.length+" term(s) from "+p);
+    setStatus("Loaded "+fresh2.length+" IOC term(s) from the toolkit IOC.txt","ok");
+  }catch(e){}
+}
+
+/* ---------- run provenance (family, 2026-07-06) ----------
+   Appended into <outDir>\runinfo.json after every successful run. The Artifact-Finder reads these to
+   bind outputs to their exact source (and host) even without its manifest. files[] are paths
+   relative to outDir (the plugin detail CSV sits in RECmd's stamp subfolder); this app also uses them
+   to reload a whole run from any one of its CSVs. */
+function writeRunInfo(outdir, input, freshFiles, extra){
+  try{
+    var p=String(outdir).replace(/[\\\/]+$/,"")+"\\runinfo.json";
+    var arr=[];
+    try{ if(fileExists(p)){ var old=JSON.parse(readUtf8(p)); if(old && old.length!=null) arr=old; } }catch(e0){}
+    var d=new Date(); function p2(x){ return (x<10?"0":"")+x; }
+    var iso=d.getUTCFullYear()+"-"+p2(d.getUTCMonth()+1)+"-"+p2(d.getUTCDate())+"T"+p2(d.getUTCHours())+":"+p2(d.getUTCMinutes())+":"+p2(d.getUTCSeconds())+"Z";
+    var names=[]; for(var i=0;i<freshFiles.length && i<50;i++) names.push(freshFiles[i].name||String(freshFiles[i]));
+    var ent={app:APP_NAME, appVersion:APP_VERSION, host:sanitHost($("hostName").value),
+              input:String(input||""), finishedUtc:iso, files:names};
+    if(CASE_FROM) ent.winFrom=CASE_FROM; if(CASE_TO) ent.winTo=CASE_TO;   // case window recorded (Finder-observable), never scored
+    if(extra){ for(var k in extra){ if(extra.hasOwnProperty(k)) ent[k]=extra[k]; } }
+    arr.push(ent);
+    writeUtf8(p, JSON.stringify(arr,null,2));
+    RUNINFO_LAST={path:p, iso:iso};
+  }catch(e){}
+}
+var RUNINFO_LAST=null;   // the entry writeRunInfo just appended - patched with a triage summary after the auto-load
+function patchRunInfoSummary(summary, extra){
+  /* second-phase runinfo write (family, 2026-07-07): the scored rows only exist after the auto-load
+     that follows a run, so the headline triage numbers are patched onto the entry writeRunInfo
+     appended moments earlier. Best-effort - a missing summary just shows as counts-only. */
+  try{
+    if(!RUNINFO_LAST || !summary) return;
+    var arr=JSON.parse(readUtf8(RUNINFO_LAST.path));
+    if(!arr || arr.length==null) return;
+    for(var i=arr.length-1;i>=0;i--){ var e=arr[i];
+      if(e && e.app===APP_NAME && e.finishedUtc===RUNINFO_LAST.iso){ e.summary=summary;
+        if(extra){ for(var k in extra){ if(extra.hasOwnProperty(k)) e[k]=extra[k]; } }
+        break; } }
+    writeUtf8(RUNINFO_LAST.path, JSON.stringify(arr,null,2));
+  }catch(e){}
+}
+function buildRunSummary(){
+  /* headline triage numbers: entries = service records (current set + other-set-only + log-only),
+     flagged = this app's own threshold (score >= 3), max score, top-3 "name (score)". */
+  try{
+    if(!SVCS.length) return null;
+    var flagged=0, maxScore=0, top=[], i;
+    for(i=0;i<SVCS.length;i++){ var r=SVCS[i];
+      if(r.score>maxScore) maxScore=r.score;
+      if(r.sus) flagged++; }
+    var sorted=SVCS.slice(0);
+    sorted.sort(function(a,b){ return b.score-a.score; });
+    for(i=0;i<sorted.length && top.length<3;i++){ if(sorted[i].score>0) top.push(sorted[i].name+" ("+sorted[i].score+")"); }
+    return {entries:SVCS.length, flagged:flagged, maxScore:maxScore, top:top};
+  }catch(e){ return null; }
+}
+
+/* ---------- source location ----------
+   A folder input is enumerated with  dir /s /b | findstr  (FSO recursion dies on the long paths
+   Velociraptor trees produce); a file input is classified by name. Logs pair to a hive at
+   parent(parent(hive))\winevt\Logs\ (true in Velociraptor and KAPE layouts: ...\System32\config\SYSTEM
+   <-> ...\System32\winevt\Logs\), else the nearest log in the same collection. */
+function setSrc(id,v){ $(id).value=v||""; }
+function collSeg(p){ var m=String(p).match(/[\\\/](Collection-[A-Za-z0-9][A-Za-z0-9\-_\.]*?-\d{4}-\d{2}-\d{2}T[0-9_:]+Z?)[\\\/]/i); return m?m[1]:""; }
+function collStamp(p){ var m=String(p).match(/-(\d{4}-\d{2}-\d{2}T[0-9_:]+)Z?[\\\/]/i); return m?m[1]:""; }
+/* folder-level comparison (a character prefix would make ...\HOSTA\ and ...\HOSTB\ look related) */
+function dirSegs(p){ var s=String(p).toLowerCase().split("\\"); s.pop(); return s; }
+function commonSegs(a,b){ var x=dirSegs(a), y=dirSegs(b), n=Math.min(x.length,y.length), i=0; while(i<n && x[i]===y[i]) i++; return i; }
+/* the source nearest to anchor that provably belongs to the same host - or "" (never a guess across hosts) */
+function pickNearest(anchor, list, root){
+  var seg=collSeg(anchor), best="", bl=-1, i, ad=parentDir(anchor).toLowerCase(),
+      rootSegs=root?String(root).replace(/[\\\/]+$/,"").split("\\").length:0;
+  for(i=0;i<list.length;i++){
+    if(seg && collSeg(list[i])!==seg) continue;            // never pair a log from another collection
+    var l=commonSegs(anchor,list[i]);
+    if(!seg && parentDir(list[i]).toLowerCase()!==ad && l<=rootSegs) continue;   // no collection segment: same folder, or a shared folder below the input root
+    if(l>bl){ bl=l; best=list[i]; } }
+  return best;
+}
+/* mshta is not long-path aware: FSO reports a path longer than MAX_PATH (260) as missing even when it exists,
+   and Velociraptor trees routinely exceed MAX_PATH (VERIFIED 2026-10-03: a staged 261-char Security.evtx path
+   read as missing while the 259-char System.evtx beside it was fine). The .NET engines handle long paths, so
+   for a source FSO cannot see we trust the folder enumeration (or the operator) and let the engine report a
+   genuine miss. */
+var MAXP=259;
+function isLongPath(p){ return String(p||"").length>MAXP; }
+function inListCI(p, list){ var l=String(p).toLowerCase(); list=list||[]; for(var i=0;i<list.length;i++){ if(String(list[i]).toLowerCase()===l) return true; } return false; }
+function srcSeen(p, list){ return fileExists(p) || inListCI(p, list) || (isLongPath(p) && !(list && list.length)); }
+function srcOk(p, what){
+  if(fileExists(p)) return true;
+  if(isLongPath(p)){ appendLog("Note: the "+what+" path is "+String(p).length+" characters (over MAX_PATH) - this app cannot verify it; the engine reads it and reports it if it is really missing: "+p); return true; }
+  setStatus(what+" not found: "+p,"err"); return false;
+}
+function pairLogs(hive, sysList, secList, root){
+  var s32=parentDir(parentDir(hive)), sp=s32+"\\winevt\\Logs\\System.evtx", cp=s32+"\\winevt\\Logs\\Security.evtx";
+  setSrc("sysPath", srcSeen(sp,sysList)?sp:pickNearest(hive, sysList||[], root));
+  setSrc("secPath", srcSeen(cp,secList)?cp:pickNearest(hive, secList||[], root));
+}
+function fillHiveSel(list){
+  var sel=$("hiveSel"); sel.innerHTML="";
+  for(var i=0;i<list.length;i++){ var o=document.createElement("option"); o.value=list[i];
+    o.text=(collSeg(list[i])?(collSeg(list[i])+"  ::  "):"")+shortPathN(list[i],5); sel.add(o); }
+  showEl("hiveSelRow", list.length>1);
+}
+function srcSummary(){
+  var h=trimStr($("hivePath").value), s=trimStr($("sysPath").value), c=trimStr($("secPath").value);
+  var msg="Sources: SYSTEM hive "+(h?"found":"MISSING")+" \u00b7 System.evtx "+(s?"found":"missing")+" \u00b7 Security.evtx "+(c?"found":"missing");
+  if(HIVE_CANDS.length>1) msg+=" \u00b7 "+HIVE_CANDS.length+" SYSTEM hives - pick one above";
+  if(!h && (s||c)) msg+=" - events-only run (no hive: every install is log-only by definition)";
+  else if(h && !s && !c) msg+=" - hive-only run (no install history)";
+  setStatus(msg, h?"ok":((s||c)?"muted":"err"));
+}
+function locateSources(input, cb){
+  input=trimStr(input||"");
+  HIVE_CANDS=[]; LOG_CANDS={sys:[], sec:[], root:""}; fillHiveSel([]);
+  if(!input){ if(cb) cb(false); return; }
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  if(fso.FileExists(input) || (isLongPath(input) && !fso.FolderExists(input) && /(\.evtx|\.csv|\\system)$/i.test(input))){
+    var b=baseName(input).toLowerCase(), d=parentDir(input);
+    if(/\.csv$/.test(b)){ if(cb) cb(false); return; }
+    if(/\.evtx$/.test(b)){
+      if(b==="security.evtx"){ setSrc("secPath",input); setSrc("sysPath", srcSeen(d+"\\System.evtx",[])?(d+"\\System.evtx"):""); }
+      else { setSrc("sysPath",input); setSrc("secPath", srcSeen(d+"\\Security.evtx",[])?(d+"\\Security.evtx"):""); }
+      var s32=parentDir(parentDir(d)); setSrc("hivePath", srcSeen(s32+"\\config\\SYSTEM",[])?(s32+"\\config\\SYSTEM"):"");
+    } else { setSrc("hivePath",input); pairLogs(input,[],[],""); }
+    hostGuessFrom(input); srcSummary(); if(cb) cb(true); return;
+  }
+  if(!fso.FolderExists(input)){ setStatus("Input not found: "+input,"err"); if(cb) cb(false); return; }
+  setStatus("Locating the SYSTEM hive and event logs under "+input+"\u2026","muted");
+  var lst=fso.GetSpecialFolder(2)+"\\svcan_loc_"+uid()+".lst";
+  var ctx=runBatAsync([
+    'dir "'+batEsc(argSafePath(input))+'" /s /b /a:-d 2>nul | findstr /i /r "\\\\config\\\\SYSTEM$ \\\\Logs\\\\System.evtx$ \\\\Logs\\\\Security.evtx$" > "'+batEsc(lst)+'"'
+  ], false);
+  ctx.onTick=function(s){ setStatus("Locating sources under "+input+"\u2026 "+s+"s","muted"); };
+  ctx.onTimeout=function(){ setStatus("Source search timed out","err"); if(cb) cb(false); };
+  ctx.onDone=function(){
+    var lines=[], i;
+    try{ if(fso.FileExists(lst)){ var f=fso.OpenTextFile(lst,1,false,0); while(!f.AtEndOfStream){ var ln=trimStr(f.ReadLine()); if(ln) lines.push(ln); } f.Close(); fso.DeleteFile(lst); } }catch(e){}
+    var hv=[], sy=[], se=[];
+    for(i=0;i<lines.length;i++){ var l=lines[i], ll=l.toLowerCase();
+      if(/\\config\\system$/.test(ll) && ll.indexOf("\\regback\\")<0) hv.push(l);
+      else if(/\\logs\\system\.evtx$/.test(ll)) sy.push(l);
+      else if(/\\logs\\security\.evtx$/.test(ll)) se.push(l); }
+    hv.sort(function(a,b){ var x=collStamp(a), y=collStamp(b); if(x!==y) return x<y?1:-1; return a<b?-1:(a>b?1:0); });   // newest collection first
+    HIVE_CANDS=hv; LOG_CANDS={sys:sy, sec:se, root:input};
+    if(hv.length){ fillHiveSel(hv); setSrc("hivePath",hv[0]); pairLogs(hv[0],sy,se,input); hostGuessFrom(hv[0]); }
+    else {   // events-only: Security only when it provably belongs to the same host as System (left blank otherwise - never mixed)
+      var s0=sy.length?sy[0]:"";
+      setSrc("hivePath",""); setSrc("sysPath", s0); setSrc("secPath", s0 ? pickNearest(s0, se, input) : (se.length?se[0]:""));
+      hostGuessFrom(s0||se[0]||input); }
+    srcSummary();
+    if(cb) cb(!!(hv.length||sy.length||se.length));
+  };
+  window.setTimeout(function(){ pollDone(ctx); }, 500);
+}
+
+/* ---------- processing: RECmd (SYSTEM) + EvtxECmd (System, Security) in one visible console ----------
+   Each step's output goes to one log with ===STEP:<name>=== markers (split afterwards; the marker
+   written last also tells the status ticker which step is running). */
+function fileStamp(){ var d=new Date(); function p(x){return (x<10?"0":"")+x;}
+  return d.getFullYear()+""+p(d.getMonth()+1)+p(d.getDate())+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds()); }
+function processRun(){
+  if(BUSY){ setStatus("A run is already in progress - wait for it to finish.","err"); return; }
+  var hive=trimStr($("hivePath").value), sys=trimStr($("sysPath").value), sec=trimStr($("secPath").value), inp=trimStr($("inPath").value);
+  if(!hive && !sys && !sec){
+    if(inp){ locateSources(inp, function(ok){
+        if(ok) processRun(); else setStatus("No SYSTEM hive or System / Security.evtx found under the input - nothing to process.","err"); });
+      return; }
+    setStatus("Point the input at a collection folder, a SYSTEM hive or an event log first.","err"); return;
+  }
+  if(!requireHost()) return;
+  var outdir=trimStr($("outDir").value);
+  if(!outdir){ setStatus("Set an output directory","err"); return; }
+  if(hive && !srcOk(hive,"SYSTEM hive")) return;
+  if(sys && !srcOk(sys,"System.evtx")) return;
+  if(sec && !srcOk(sec,"Security.evtx")) return;
+  var notes=[];
+  if(hive){
+    if(!EXE||!fileExists(EXE)){ setStatus("RECmd.exe not found - use 'Update / download RECmd' first","err"); return; }
+    if(!servicesPluginOk()){ setStatus("RECmd Plugins folder incomplete - "+EXE_DIR+"\\Plugins\\RegistryPlugin.Services.dll is required (the Services plugin is the analytic core). Re-download RECmd.","err"); return; }
+  }
+  if((sys||sec) && (!EVX||!fileExists(EVX))){
+    if(!hive){ setStatus("EvtxECmd.exe not found - use 'Update / download EvtxECmd' first","err"); return; }
+    notes.push("EvtxECmd not found - event logs skipped, hive-only run"); sys=""; sec="";
+  }
+  if(!ensureDir(outdir)){ setStatus("Could not create the output folder "+outdir,"err"); return; }
+  var reb=outdir.replace(/[\\\/]+$/,"")+"\\"+REB_NAME;
+  if(hive){ try{ writeAscii(reb, REB_TEXT); }catch(ew){ setStatus("Could not write the batch file "+reb+": "+ew.message,"err"); return; } }
+  RUN={outdir:outdir, hive:hive, sys:sys, sec:sec, input:inp||hive||sys||sec, reb:reb, stamp:fileStamp(),
+       before:csvNameSet(outdir), nl:false, logs:{rec:"",sys:"",sec:""}, notes:notes};
+  DIRTY_NOTE="";
+  startRunBat(RUN, false);
+}
+function startRunBat(R, recOnly){
+  var bout=batEsc(argSafePath(R.outdir)), steps=0, n=0;
+  if(R.hive) steps++; if(!recOnly){ if(R.sys) steps++; if(R.sec) steps++; }
+  var L=["set DOTNET_ROLL_FORWARD=Major", 'if not exist "'+bout+'" mkdir "'+bout+'"',
+    "echo Services-Analyzer is processing - this window closes automatically when finished.",
+    "echo Output: "+bout, "echo."];
+  L.push('echo ===STEP:RECMD===> "__LOG__"');
+  if(R.hive){ n++; L.push("echo ["+n+"/"+steps+"] RECmd - SYSTEM hive, Services plugin"+(R.nl?" - retry with --nl, no log replay":""));
+    L.push('"'+batEsc(EXE)+'" --bn "'+batEsc(argSafePath(R.reb))+'" -f "'+batEsc(argSafePath(R.hive))+'" --csv "'+bout+'"'+(R.nl?" --nl":"")+' >> "__LOG__" 2>&1'); }
+  if(!recOnly){
+    var maps=evxMapsDir(), mp=maps?(' --maps "'+batEsc(maps)+'"'):"";
+    L.push('echo ===STEP:SYSLOG===>> "__LOG__"');
+    if(R.sys){ n++; L.push("echo ["+n+"/"+steps+"] EvtxECmd - System.evtx: installs, start-type changes, crashes and failures");
+      L.push('"'+batEsc(EVX)+'" -f "'+batEsc(argSafePath(R.sys))+'" --csv "'+bout+'" --csvf '+R.stamp+'_ServicesAnalyzer_SystemLog.csv --inc '+SYS_IDS+mp+' >> "__LOG__" 2>&1'); }
+    L.push('echo ===STEP:SECLOG===>> "__LOG__"');
+    if(R.sec){ n++; L.push("echo ["+n+"/"+steps+"] EvtxECmd - Security.evtx: 4697 installs - the largest log, can take a minute");
+      L.push('"'+batEsc(EVX)+'" -f "'+batEsc(argSafePath(R.sec))+'" --csv "'+bout+'" --csvf '+R.stamp+'_ServicesAnalyzer_SecurityLog.csv --inc 4697'+mp+' >> "__LOG__" 2>&1'); }
+  }
+  L.push('echo ===STEP:END===>> "__LOG__"');
+  appendLog("Running"+(recOnly?" (RECmd --nl retry)":"")+":"
+    +(R.hive?("\n  \""+EXE+"\" --bn \""+R.reb+"\" -f \""+R.hive+"\" --csv \""+R.outdir+"\""+(R.nl?" --nl":"")):"")
+    +(!recOnly && R.sys?("\n  \""+EVX+"\" -f \""+R.sys+"\" --csv \""+R.outdir+"\" --csvf "+R.stamp+"_ServicesAnalyzer_SystemLog.csv --inc "+SYS_IDS):"")
+    +(!recOnly && R.sec?("\n  \""+EVX+"\" -f \""+R.sec+"\" --csv \""+R.outdir+"\" --csvf "+R.stamp+"_ServicesAnalyzer_SecurityLog.csv --inc 4697"):"")
+    +"\nA console window shows progress; the app stays responsive and loads results automatically when done.");
+  BUSY=true; $("procBtn").disabled=true;
+  var ctx=runBatAsync(L, true);
+  ctx.procTimed=true; procStart("Processing");
+  ctx.onTick=function(s){ setStatus(stepLabel(peekStep(ctx.log))+" - "+s+"s elapsed (app responsive; results load when done)","muted"); };
+  ctx.onTimeout=function(){ BUSY=false; $("procBtn").disabled=false; setStatus("Still running after 30 min - stopped watching. Check the output folder / console window.","err"); };
+  ctx.onDone=function(log){ BUSY=false; $("procBtn").disabled=false; finishRun(R, log, recOnly); };
+  setStatus("Starting\u2026"+(recOnly?" (RECmd retry without log replay)":""),"muted");
+  window.setTimeout(function(){ pollDone(ctx); }, 1000);
+}
+function peekStep(logPath){
+  try{ var fso=new ActiveXObject("Scripting.FileSystemObject"); if(!fso.FileExists(logPath)) return "";
+    var f=fso.OpenTextFile(logPath,1,false,0), t=f.ReadAll(); f.Close();
+    var m, last="", re=/===STEP:(\w+)===/g; while((m=re.exec(t))) last=m[1]; return last; }catch(e){ return ""; }
+}
+function stepLabel(s){
+  if(s==="RECMD") return "RECmd: SYSTEM hive (Services plugin)";
+  if(s==="SYSLOG") return "EvtxECmd: System.evtx";
+  if(s==="SECLOG") return "EvtxECmd: Security.evtx (largest log)";
+  if(s==="END") return "Finishing";
+  return "Running";
+}
+function splitSections(log){
+  var o={rec:"",sys:"",sec:""}, cur="", parts=String(log||"").split(/\r?\n/);
+  for(var i=0;i<parts.length;i++){ var m=parts[i].match(/^===STEP:(\w+)===\s*$/); if(m){ cur=m[1]; continue; }
+    if(cur==="RECMD") o.rec+=parts[i]+"\n"; else if(cur==="SYSLOG") o.sys+=parts[i]+"\n"; else if(cur==="SECLOG") o.sec+=parts[i]+"\n"; }
+  return o;
+}
+/* RECmd prints one "Found key ... and value ...!" line per matched value (~430 per hive) - keep the rest */
+function quietRecmd(t){ return String(t).replace(/^Found key .+ and value .+!\s*$/mg,"").replace(/(\r?\n){3,}/g,"\n\n"); }
+/* Dirty hives (VERIFIED 2026-07-07, RECmd 2.0.0.0): without .LOG1/.LOG2 siblings RECmd prints
+   "Registry hive is dirty and no transaction logs were found in the same directory! ... Aborting!!"
+   and writes NO CSV. No new batch CSV + any dirty-hive-ish message -> ONE automatic --nl retry. */
+function looksDirtyAbort(log){
+  return /hive is dirty|dirty hive|transaction logs (were|was) (not )?found|LOGs should have same base name/i.test(log||"");
+}
+function newestMatch(list, re){ for(var i=0;i<list.length;i++){ if(re.test(list[i].name)) return list[i]; } return null; }   // list is newest-stamp first
+function relTo(dir, p){ var d=String(dir).replace(/[\\\/]+$/,"")+"\\"; return (String(p).toLowerCase().indexOf(d.toLowerCase())===0)?String(p).substring(d.length):String(p); }
+function finishRun(R, log, recOnly){
+  var s=splitSections(log);
+  R.logs.rec=s.rec; if(!recOnly){ R.logs.sys=s.sys; R.logs.sec=s.sec; }
+  if(R.hive) appendLog("--- RECmd"+(R.nl?" (--nl retry)":"")+" ---\n"+quietRecmd(s.rec));
+  if(!recOnly){ if(R.sys) appendLog("--- EvtxECmd System.evtx ---\n"+s.sys); if(R.sec) appendLog("--- EvtxECmd Security.evtx ---\n"+s.sec); }
+  // LASTOUTDIR moves to R.outdir only once this run's data is on screen (loadRunSet) - a failed run must not
+  // redirect exports of the previous host's table into this run's folder
+  var all=listCsvFiles(R.outdir), fresh=[], i;
+  for(i=0;i<all.length;i++){ if(!R.before.hasOwnProperty("#"+all[i].name)) fresh.push(all[i]); }
+  var bat=newestMatch(fresh,/_RECmd_Batch_ServicesAnalyzer_Output\.csv$/i),
+      sysC=newestMatch(fresh,/_ServicesAnalyzer_SystemLog\.csv$/i),
+      secC=newestMatch(fresh,/_ServicesAnalyzer_SecurityLog\.csv$/i);
+  if(R.hive && !bat && !R.nl && looksDirtyAbort(R.logs.rec)){
+    R.nl=true; DIRTY_NOTE=" (dirty hive - processed without log replay)";
+    appendLog("Dirty hive detected with no usable transaction logs - retrying the RECmd step once with --nl (registry logs will NOT be replayed; data may be slightly stale).");
+    setStatus("Dirty hive without transaction logs - retrying RECmd with --nl\u2026","muted");
+    window.setTimeout(function(){ startRunBat(R, true); }, 300);
+    return;
+  }
+  var det=bat?detailFor(bat.path, null):"";
+  var notes=R.notes.slice(0);
+  if(R.hive && !bat) notes.push((R.nl && looksDirtyAbort(R.logs.rec)) ? "RECmd produced no CSV even with --nl - the hive may be corrupt"
+    : (/denied|unauthorized/i.test(R.logs.rec) ? "RECmd was denied access to the hive (live config hives are locked - use a collected copy)" : "RECmd produced no CSV - see the log"));
+  if(R.hive && bat && !det) notes.push("Services plugin detail CSV not found beside the batch CSV");
+  if(R.sys && !sysC) notes.push(/Records included:\s*0\b/i.test(R.logs.sys) ? "System.evtx: no service events" : "EvtxECmd produced no System-log CSV - see the log");
+  if(R.sec && !secC) notes.push(/Records included:\s*0\b/i.test(R.logs.sec) ? "Security.evtx: no 4697 events (auditing off?)" : "EvtxECmd produced no Security-log CSV - see the log");
+  if(!det && !sysC && !secC){ procFail(); setStatus("Nothing usable was produced. "+notes.join(" | "),"err"); populateProduced(all); return; }
+  var files=[];
+  if(bat) files.push({name:bat.name}); if(det) files.push({name:relTo(R.outdir, det)});
+  if(sysC) files.push({name:sysC.name}); if(secC) files.push({name:secC.name});
+  writeRunInfo(R.outdir, R.input, files, {sources:{hive:!!det, systemLog:!!sysC, securityLog:!!secC}});
+  var set={dir:R.outdir, batch:bat?bat.path:"", detail:det||"", sys:sysC?sysC.path:"", sec:secC?secC.path:""};
+  PRODUCED=fresh;
+  populateProduced(runSetList(set));
+  if(!loadRunSet(set, "this run")){   // never summarise whatever was on screen before into this run's runinfo
+    procFail(); setStatus("The run produced CSVs but they could not be loaded - see the log and the status above. "+notes.join(" | "),"err"); return; }
+  patchRunInfoSummary(buildRunSummary(), {hiveHost:META.hiveHost||""});   // rows are scored now - add the triage headline
+  var m0=R.logs.rec.match(/Found ([\d,]+) key\/value pairs across (\d+) file/i);
+  setStatus("Run complete - "+loadSummaryText()+(m0?(" RECmd matched "+m0[1]+" key/value pairs."):"")+DIRTY_NOTE+(notes.length?(" | "+notes.join(" | ")):""), notes.length?"warn":"ok");
+}
+function csvNameSet(dir){ var o={}, l=listCsvFiles(dir); for(var i=0;i<l.length;i++) o["#"+l[i].name]=true; return o; }
+function listCsvFiles(dir){
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), out=[];
+  if(!fso.FolderExists(dir)) return out;
+  var e=new Enumerator(fso.GetFolder(dir).Files);
+  for(; !e.atEnd(); e.moveNext()){ var f=e.item(); if(/\.csv$/i.test(f.Name+"")) out.push({name:f.Name+"", path:f.Path+"", size:f.Size}); }
+  out.sort(function(a,b){ return a.name<b.name?1:(a.name>b.name?-1:0); });   // newest timestamp-prefix first
+  return out;
+}
+/* RECmd writes the plugin detail CSV into a <stamp>\ subfolder named after the batch CSV's own stamp;
+   PluginDetailFile in the batch CSV is the absolute path at run time (stale once a run is moved). */
+function detailFor(batchPath, batchObj){
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), m=baseName(batchPath).match(/^(\d{14})_/), i;
+  if(m){ var d=parentDir(batchPath)+"\\"+m[1];
+    if(fso.FolderExists(d)){ var best="", e=new Enumerator(fso.GetFolder(d).Files);
+      for(; !e.atEnd(); e.moveNext()){ var n=e.item().Name+""; if(/_Services__.*\.csv$/i.test(n) && (!best || n>baseName(best))) best=e.item().Path+""; }
+      if(best) return best; } }
+  try{
+    var c=batchObj||readCsvObj(batchPath), ip=c.idx.hasOwnProperty("PluginDetailFile")?c.idx.PluginDetailFile:-1;
+    if(ip<0) return "";
+    for(i=1;i<c.raw.length;i++){ var p=trimStr(cell(c.raw[i],ip)); if(!p) continue;
+      if(fileExists(p)) return p;
+      var alt=parentDir(batchPath)+"\\"+baseName(parentDir(p))+"\\"+baseName(p); if(fileExists(alt)) return alt;
+      break; }
+  }catch(e2){}
+  return "";
+}
+function fmtSize(n){ if(!n) return "0 B"; var u=["B","KB","MB","GB"], i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return n.toFixed(i?1:0)+" "+u[i]; }
+function runSetList(set){
+  var out=[], fso=new ActiveXObject("Scripting.FileSystemObject"), k, keys=["batch","detail","sys","sec"];
+  for(var i=0;i<keys.length;i++){ k=keys[i]; if(!set[k]) continue; var sz=0; try{ sz=fso.GetFile(set[k]).Size; }catch(e){}
+    out.push({name:baseName(set[k]), path:set[k], size:sz}); }
+  return out;
+}
+function populateProduced(list){
+  var sel=$("producedSel"); sel.innerHTML="";
+  for(var i=0;i<list.length;i++){
+    var n=list[i].name, lab=n+"  ("+fmtSize(list[i].size)+")";
+    if(/_RECmd_Batch_.*_Output\.csv$/i.test(n)) lab+="  - RECmd batch (current set, ComputerName, account / failure command / ServiceMain values)";
+    else if(/_Services__.*\.csv$/i.test(n)) lab+="  - Services plugin detail (one row per service)";
+    else if(/_ServicesAnalyzer_SystemLog\.csv$/i.test(n)) lab+="  - System log (7045 / 7040 / crashes and failures)";
+    else if(/_ServicesAnalyzer_SecurityLog\.csv$/i.test(n)) lab+="  - Security log (4697)";
+    var o=document.createElement("option"); o.value=list[i].path; o.text=lab; sel.add(o);
+  }
+  showEl("producedRow", list.length>0);
+}
+function openDir(){ var d=$("outDir").value; if(!d){ setStatus("No output directory set","err"); return; }
+  try{ new ActiveXObject("WScript.Shell").Run('explorer.exe "'+d+'"',1,false); }catch(e){ setStatus("Could not open folder: "+e.message,"err"); } }
+
+/* ---------- CSV parser (RFC4180) - line-split hybrid: native split for the bulk,
+   careful field parsing only for lines containing quotes; merges rows split across
+   newlines inside quoted fields. Orders of magnitude faster than char-by-char in MSHTML. */
+function countQuotes(s){ var c=0, idx=-1; while((idx=s.indexOf('"',idx+1))>=0) c++; return c; }
+function parseCSVLine(line){
+  if(line.indexOf('"')<0) return line.split(",");   // fast path: no quotes -> plain split
+  var out=[], field="", q=false, i=0, n=line.length;
+  while(i<n){ var c=line.charAt(i);
+    if(q){ if(c==='"'){ if(line.charAt(i+1)==='"'){ field+='"'; i+=2; continue; } q=false; i++; continue; } field+=c; i++; continue; }
+    if(c==='"'){ q=true; i++; continue; }
+    if(c===','){ out.push(field); field=""; i++; continue; }
+    field+=c; i++;
+  }
+  out.push(field); return out;
+}
+function parseCSV(text){
+  if(text.charCodeAt(0)===0xFEFF) text=text.substring(1);
+  var lines=text.split("\n"), rows=[], i=0, n=lines.length;
+  while(i<n){
+    var line=lines[i]; i++;
+    // a quoted field may contain a newline -> merge continuation lines until quotes balance
+    var qc=countQuotes(line);
+    while((qc%2)===1 && i<n){ line+="\n"+lines[i]; qc+=countQuotes(lines[i]); i++; }
+    if(line.charAt(line.length-1)==='\r') line=line.substring(0,line.length-1);
+    if(line==="") continue;
+    rows.push(parseCSVLine(line));
+  }
+  return rows;
+}
+function cell(rw,i){ return (i>=0&&i<rw.length)?rw[i]:""; }
+function readCsvObj(path){ var raw=parseCSV(readUtf8(path)), idx={};
+  if(raw.length){ for(var h=0;h<raw[0].length;h++) idx[trimStr(raw[0][h])]=h; }
+  return {raw:raw, idx:idx, path:path}; }
+function gi(c,n){ return (c && c.idx.hasOwnProperty(n)) ? c.idx[n] : -1; }
+
+/* ---------- reload: any CSV of a run brings back the whole run (runinfo.json files[]) ---------- */
+function readRunInfo(dir){ var p=String(dir).replace(/[\\\/]+$/,"")+"\\runinfo.json"; if(!fileExists(p)) return [];
+  try{ var a=JSON.parse(readUtf8(p)); return (a&&a.length!=null)?a:[]; }catch(e){ return []; } }
+function setFromEntry(dir, ent){
+  var set={dir:dir, batch:"", detail:"", sys:"", sec:""}, f=ent.files||[], i;
+  for(i=0;i<f.length;i++){ var rel=String(f[i]), p=dir+"\\"+rel; if(!fileExists(p)) continue;
+    if(/_RECmd_Batch_.*_Output\.csv$/i.test(rel)) set.batch=p;
+    else if(/_Services__.*\.csv$/i.test(rel)) set.detail=p;
+    else if(/_ServicesAnalyzer_SystemLog\.csv$/i.test(rel)) set.sys=p;
+    else if(/_ServicesAnalyzer_SecurityLog\.csv$/i.test(rel)) set.sec=p; }
+  if(set.batch && !set.detail) set.detail=detailFor(set.batch, null);
+  return (set.detail||set.sys||set.sec)?set:null;
+}
+function runSetForCsv(path){
+  var b=baseName(path).toLowerCase(), dirs=[parentDir(path), parentDir(parentDir(path))], k, i, j;
+  for(k=0;k<dirs.length;k++){ var d=dirs[k], arr=readRunInfo(d);
+    for(i=arr.length-1;i>=0;i--){ var e=arr[i]; if(!e || e.app!==APP_NAME || !e.files) continue;
+      for(j=0;j<e.files.length;j++){ if(baseName(String(e.files[j])).toLowerCase()===b){ var s=setFromEntry(d,e); if(s) return s; } } } }
+  return null;
+}
+function runSetForFolder(dir){ var arr=readRunInfo(dir);
+  for(var i=arr.length-1;i>=0;i--){ var e=arr[i]; if(e && e.app===APP_NAME && e.files){ var s=setFromEntry(dir,e); if(s) return s; } }
+  return null; }
+function loadAnyCsv(path){
+  var set=null; try{ set=runSetForCsv(path); }catch(e){}
+  if(set){ populateProduced(runSetList(set)); loadRunSet(set, baseName(path)); return; }
+  var c; try{ c=readCsvObj(path); }catch(e2){ setStatus("Could not read CSV: "+e2.message,"err"); return; }
+  if(!c.raw.length){ setStatus("Empty / unparseable CSV","err"); return; }
+  if(gi(c,"Name")>=0 && gi(c,"BatchKeyPath")>=0 && gi(c,"ImagePath")>=0){ loadRunSet({dir:parentDir(path), detail:path}, baseName(path), {detail:c}); return; }
+  if(gi(c,"HivePath")>=0 && gi(c,"KeyPath")>=0 && gi(c,"PluginDetailFile")>=0){
+    var det=detailFor(path, c);
+    if(det){ loadRunSet({dir:parentDir(path), batch:path, detail:det}, baseName(path), {batch:c}); return; }
+    LOADED_CSV_DIR=parentDir(path); ingestGeneric(c.raw, c.raw[0], baseName(path)); setStatus("RECmd batch CSV loaded as a plain table - its Services plugin detail CSV was not found","warn"); return;
+  }
+  if(gi(c,"EventId")>=0 && gi(c,"Payload")>=0){
+    var is4697=false, ie=gi(c,"EventId");
+    for(var r=1;r<c.raw.length && r<200;r++){ if(trimStr(cell(c.raw[r],ie))==="4697"){ is4697=true; break; } }
+    var s2={dir:parentDir(path)}, pre={};
+    if(is4697){ s2.sec=path; pre.sec=c; } else { s2.sys=path; pre.sys=c; }
+    loadRunSet(s2, baseName(path), pre); return;
+  }
+  LOADED_CSV_DIR=parentDir(path);
+  ingestGeneric(c.raw, c.raw[0], baseName(path));
+}
+/* returns true when the run is on screen. The export / summary targets (LASTOUTDIR, LOADED_CSV_DIR) move only
+   then: a read failure keeps the previous view AND its folder; an empty load clears the view (ingestServices). */
+function loadRunSet(set, label, pre){
+  pre=pre||{};
+  var parts={}, keys=["detail","batch","sys","sec"], k="";
+  try{ for(var i=0;i<keys.length;i++){ k=keys[i]; parts[k]=pre[k] || (set[k] ? readCsvObj(set[k]) : null); } }
+  catch(e){ setStatus("Could not read "+(set[k]||k)+": "+e.message,"err"); return false; }
+  if(!ingestServices(parts.detail, parts.batch, parts.sys, parts.sec, label)) return false;
+  if(set.dir){ LASTOUTDIR=set.dir; LOADED_CSV_DIR=set.dir;
+    /* a reloaded run names its host in its folder (_Processed\<host>\Services-Analyzer) - fill an empty hostname
+       field from it (never overwrite a typed one) so the ComputerName cross-check has something to compare */
+    if(!trimStr($("hostName").value)){ var g=guessHost(String(set.dir)+"\\"); if(g){ $("hostName").value=sanitHost(g); if(!OUT_TOUCHED && !trimStr($("outDir").value)) $("outDir").value=set.dir; hostCheck(); } } }
+  return true;
+}
+
+/* ---------- normalisation helpers ---------- */
+function decodeEnt(s){ s=String(s==null?"":s); if(s.indexOf("&")<0) return s;
+  return s.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&apos;/g,"'")
+    .replace(/&#(\d+);/g,function(a,n){ return String.fromCharCode(parseInt(n,10)); })
+    .replace(/&#x([0-9a-f]+);/gi,function(a,n){ return String.fromCharCode(parseInt(n,16)); })
+    .replace(/&amp;/g,"&"); }
+/* SCM failure events carry the service KEY name as UTF-16LE in Binary ("45-00-76-00-...-00-00") */
+function utf16FromHex(h){ var p=String(h).split("-"), s="", i;
+  for(i=0;i+1<p.length;i+=2){ var lo=parseInt(p[i],16), hi=parseInt(p[i+1],16); if(isNaN(lo)||isNaN(hi)) return "";
+    var c=lo+hi*256; if(c===0) break; if(c<32) return ""; s+=String.fromCharCode(c); }
+  return /^[A-Za-z0-9_.\-$ ]{1,256}$/.test(s)?s:""; }
+function payloadOf(s){
+  var out={d:{}, bin:""}; s=trimStr(String(s||"")); if(!s || s.charAt(0)!=="{") return out;
+  try{ var o=JSON.parse(s), ed=o?o.EventData:null; if(!ed) return out;
+    var data=ed.Data; if(data && data.length==null) data=[data];
+    if(data){ for(var i=0;i<data.length;i++){ var e=data[i]; if(!e || typeof e!=="object") continue; var n=e["@Name"]; if(n==null) continue;
+      var v=e["#text"]; out.d[String(n)]=decodeEnt(v==null?"":String(v)); } }
+    if(ed.Binary) out.bin=utf16FromHex(String(ed.Binary));
+  }catch(e2){}
+  return out;
+}
+function pv(d,k){ return d.hasOwnProperty(k)?d[k]:""; }
+function labelVal(s,label){ s=trimStr(decodeEnt(s)); var p=label+":"; return s.indexOf(p)===0?trimStr(s.substring(p.length)):""; }
+function expandEnv(s){
+  s=trimStr(String(s||""));
+  s=s.replace(/^"?\\\?\?\\/,function(a){ return a.charAt(0)==='"'?'"':""; });   // \??\C:\... (NT object path)
+  s=s.replace(/^("?)\\SystemRoot\\/i,"$1C:\\Windows\\");
+  s=s.replace(/%systemroot%|%windir%/ig,"C:\\Windows");
+  s=s.replace(/%programdata%/ig,"C:\\ProgramData");
+  s=s.replace(/%programfiles\(x86\)%/ig,"C:\\Program Files (x86)");
+  s=s.replace(/%programfiles%/ig,"C:\\Program Files");
+  s=s.replace(/%commonprogramfiles%/ig,"C:\\Program Files\\Common Files");
+  s=s.replace(/%comspec%/ig,"C:\\Windows\\System32\\cmd.exe");
+  s=s.replace(/%systemdrive%/ig,"C:");
+  s=s.replace(/^("?)(system32|syswow64)\\/i,"$1C:\\Windows\\$2\\");
+  s=s.replace(/^("?)\\windows\\/i,"$1C:\\Windows\\");
+  return s;
+}
+function normCmd(s){ return trimStr(expandEnv(decodeEnt(s)).toLowerCase().replace(/"/g,"").replace(/\s+/g," ")); }
+function splitCmd(raw){
+  var dec=decodeEnt(String(raw||"")), x=expandEnv(dec), bin="", args="", m;
+  if(x.charAt(0)==='"'){ var q=x.indexOf('"',1); if(q>0){ bin=x.substring(1,q); args=trimStr(x.substring(q+1)); } else bin=x.substring(1); }
+  else if((m=x.match(/^(.*?\.(exe|sys|dll|bat|cmd|com|ps1|vbs|js|jar|scr))(\s|$)/i))){ bin=m[1]; args=trimStr(x.substring(m[1].length)); }
+  else { var sp=x.search(/\s/); if(sp>0){ bin=x.substring(0,sp); args=trimStr(x.substring(sp)); } else bin=x; }
+  return {raw:dec, exp:x, bin:bin, binL:bin.toLowerCase(), args:args, key:normCmd(dec)};
+}
+function normStart(s){ s=trimStr(String(s||"")).toLowerCase();
+  if(!s) return "";
+  if(s==="0"||s.indexOf("boot")===0) return "Boot";
+  if(s==="1"||s.indexOf("system")===0) return "System";
+  if(s==="2"||s.indexOf("auto")===0) return "Automatic";
+  if(s==="3"||s.indexOf("demand")===0||s==="manual") return "Manual";
+  if(s==="4"||s.indexOf("disabled")===0) return "Disabled";
+  return s.charAt(0).toUpperCase()+s.substring(1); }
+function isAutostart(st){ return st==="Boot"||st==="System"||st==="Automatic"; }
+function startRank(st){ var o={"Boot":0,"System":1,"Automatic":2,"Manual":3,"Disabled":4}; return o.hasOwnProperty(st)?o[st]:5; }
+function typeFromNum(n){
+  if(n&1) return "KernelDriver"; if(n&2) return "FileSystemDriver"; if(n&8) return "RecognizerDriver";
+  if(n&64) return "UserService (0x"+n.toString(16)+")";   /* 96 / 224 = per-user service templates / instances */
+  if(n&16) return "Win32OwnProcess"; if(n&32) return "Win32ShareProcess"; if(n&4) return "Adapter";
+  return "0x"+n.toString(16); }
+function typeLabel(t){ t=trimStr(String(t||""));
+  if(/^\d+$/.test(t)) return typeFromNum(parseInt(t,10));
+  if(/^0x[0-9a-f]+$/i.test(t)) return typeFromNum(parseInt(t,16));
+  return t; }
+function typeClass(label){ return /driver|adapter|recognizer/i.test(String(label||""))?"driver":"win32"; }
+function isUserPath(pL){ if(!pL) return false;
+  if(pL.indexOf("\\programdata\\microsoft\\")>=0) return false;   // vendor ProgramData (incl. the Defender platform) - the rule targets NON-vendor ProgramData
+  for(var i=0;i<USERPATHS.length;i++){ if(pL.indexOf(USERPATHS[i])>=0) return true; } return false; }
+function isLolbin(c){ if(!c || !c.binL) return false; var b=baseName(c.binL); if(b.indexOf(".")<0) b+=".exe";
+  if(!LOLBINS.hasOwnProperty(b)) return false;
+  if(b==="msiexec.exe" && /^\/v$/i.test(trimStr(c.args))) return false;   // the Windows Installer service itself (msiserver: msiexec.exe /V)
+  return true; }
+function okDll(dL){ return /^[a-z]:\\windows\\system32\\/.test(dL) || /^[a-z]:\\program files( \(x86\))?\\/.test(dL) || dL.indexOf("\\driverstore\\")>=0 || dL.indexOf("\\windows defender\\platform\\")>=0; }
+/* the Services plugin reports a DLL set at both levels as one composite string
+   ("Services ServiceDll: X / Parameter ServiceDll: Y", VERIFIED 2026-10-03) - split it into the real paths */
+function parseDlls(s){ s=trimStr(String(s||"")); if(!s) return [];
+  if(!/servicedll:/i.test(s)) return [s];
+  var out=[], seen={}, parts=s.split(/\s\/\s/), i;
+  for(i=0;i<parts.length;i++){ var m=parts[i].match(/servicedll:\s*(.*)$/i), v=m?trimStr(m[1]):"";
+    if(v && !seen.hasOwnProperty("#"+v.toLowerCase())){ seen["#"+v.toLowerCase()]=1; out.push(v); } }
+  return out; }
+/* vendor recovery programs ("cmd.exe /C %windir%\NvContainerRecovery.bat ...", NVIDIA) run a .bat that lives
+   under Windows / Program Files / DriverStore - not LOLBin abuse. FailureCommand only: a service ImagePath that
+   runs cmd /c on a .bat in %SYSTEMROOT% is exactly what smbexec does. */
+function vendorRecoveryBat(c){ return baseName(c.binL)==="cmd.exe" && /^\/c\s+"?[a-z]:\\(windows|program files( \(x86\))?)\\[^"&|<>]*?\.(bat|cmd)("|\s|$)/i.test(c.args); }
+function okDrv(bL){ return /^[a-z]:\\windows\\system32\\drivers\\/.test(bL) || bL.indexOf("\\driverstore\\")>=0 || /^[a-z]:\\program files( \(x86\))?\\/.test(bL) || bL.indexOf("\\windows defender\\platform\\")>=0; }
+/* random-looking names (Impacket / Metasploit style). Tuned 2026-10-03: 0 hits on 932 real service names from
+   two hives, hits a real Impacket smbexec service name; ~10-26% recall on random strings - a +1 hint, not a detector. */
+function isRandName(n){
+  n=String(n||"");
+  if(!/^[A-Za-z]{6,16}$/.test(n) || /(svc|srv|service|mgr|drv|flt)$/i.test(n)) return false;
+  var flips=0, maxU=0, maxL=0, cu=0, cl=0, vow=0, i, c, u, pu;
+  for(i=0;i<n.length;i++){ c=n.charAt(i); u=(c>="A"&&c<="Z");
+    if(/[aeiou]/i.test(c)) vow++;
+    if(u){ cu++; cl=0; } else { cl++; cu=0; }
+    if(cu>maxU) maxU=cu; if(cl>maxL) maxL=cl;
+    if(i>0){ pu=(n.charAt(i-1)>="A"&&n.charAt(i-1)<="Z"); if(pu!==u) flips++; } }
+  return flips>=4 && maxL<=2 && maxU>=3 && (vow/n.length)<=0.34;
+}
+function failDisp(id,d){ return id===7009 ? pv(d,"param2") : pv(d,"param1"); }
+function failText(id,d,pd1){
+  var p1=pv(d,"param1"), p2=pv(d,"param2");
+  if(id===7000) return "The "+p1+" service failed to start: "+p2;
+  if(id===7009) return "Timeout ("+p1+" ms) waiting for the "+p2+" service to connect";
+  if(id===7023) return "The "+p1+" service terminated with error: "+p2;
+  if(id===7024) return "The "+p1+" service terminated with service-specific error "+p2;
+  if(id===7030) return "The "+p1+" service is marked as interactive (not allowed on this system)";
+  if(id===7031) return "The "+p1+" service terminated unexpectedly ("+p2+" time(s)); recovery: "+pv(d,"param5");
+  if(id===7034) return "The "+p1+" service terminated unexpectedly ("+p2+" time(s))";
+  return trimStr(decodeEnt(pd1));
+}
+function failKind(id){ return (id===7031||id===7034)?("Crash "+id):("Start failure "+id); }
+function installerOf(it){
+  var e=it.ev, p=it.pair, sid=e.sid||"", user=(e.id===4697)?e.user:"";
+  if(p){ if(!user) user=p.user; if(!sid) sid=p.sid; }
+  if(!user && sid && META.sidNames.hasOwnProperty(sid)) user=META.sidNames[sid];
+  var label = user || (WK_SIDS.hasOwnProperty(sid)?WK_SIDS[sid]:"") || sid || "(unknown)";
+  var un=String(user).split("\\").pop(), machine=/\$$/.test(un) || /^(system|local service|network service)$/i.test(un);
+  var isUser = (sid ? !SYS_SIDS.hasOwnProperty(sid) : !!user) && !machine;   // SPEC E2: a machine account (...$) is not a user, whatever its (domain) SID
+  if(sid && !user && !SYS_SIDS.hasOwnProperty(sid)) label=sid;
+  return {label:label, sid:sid, user:user, isUser:isUser};
+}
+
+/* ---------- the model: hive records + event-log installs, joined ---------- */
+function newRec(o){
+  var r={name:String(o.name||""), disp:trimStr(o.disp||""), descr:o.descr||"", start:o.start||"", type:o.type||"", lw:o.lw||"", plw:o.plw||"",
+    group:o.group||"", image:o.image||"", dll:trimStr(o.dll||""), privs:o.privs||"", acct:trimStr(o.acct||""), failCmd:trimStr(o.failCmd||""),
+    svcMain:trimStr(o.svcMain||""), cs:o.cs||0, keyPath:o.keyPath||"", src:o.src||"HIVE", oldSet:false, csdiff:null, inst:null, chg:null, fails:null,
+    toDisabled:false, bulk:false, recent:false, no7045:false, nosvc:false, tags:[], ctx:[], reasons:[], score:0, sus:false};
+  r.nameL=r.name.toLowerCase(); r.lwMs=msOf(r.lw); r.lwDay=dayOf(r.lw); r.cmdKey=normCmd(r.image);
+  return r;
+}
+/* the install event's OWN name decides first; the paired 4697's key name only fills in when the 7045 name
+   matches nothing (a resource-string display name), so a pairing can never move evidence to another service */
+function resolveInstall(it, byName, byDisp, byCmd){
+  var nm=String(it.ev.name||""), nl=nm.toLowerCase(), r=null, how="";
+  if(nl){ r=mget(byName,nl); if(r) how="service name"; }
+  if(!r && nl){ r=mget(byDisp,nl); if(r) how="display name (7045 logs the display name when one was supplied)"; }
+  if(!r){ var pm=nm.match(/\(([^()]+)\)\s*$/); if(pm){ r=mget(byName,trimStr(pm[1]).toLowerCase()); if(r) how="key name in the display name's parentheses"; } }
+  if(!r && it.keyName){ r=mget(byName,it.keyName.toLowerCase()); if(r) how="key name from the paired 4697"; }
+  if(!r){ var ck=normCmd(it.ev.image), l=ck?mget(byCmd,ck):null; if(l && l.length===1){ r=l[0]; how="unique image path"; } }
+  it.how=how;
+  return r;
+}
+/* name evidence that a 4697 is the same install as a 7045: same name, the 4697 key's hive display name is the
+   7045 name, or the key sits in the 7045 name's parentheses */
+function nameTie(e7, s4, byName){
+  var en=String(e7.name||"").toLowerCase(), sn=String(s4.name||"").toLowerCase(); if(!sn || !en) return false;
+  if(sn===en) return true;
+  var hr=mget(byName,sn); if(hr && hr.disp && hr.disp.toLowerCase()===en) return true;
+  var pm=String(e7.name).match(/\(([^()]+)\)\s*$/); return !!(pm && trimStr(pm[1]).toLowerCase()===sn);
+}
+/* pair 7045 + 4697 for the same install (+-2 s): name evidence first (nearest in time), then a shared image ONLY
+   when it is mutually unambiguous - two services installed together from one binary are left unpaired, not crossed */
+function pairInstalls(inst7045, inst4697, byName){
+  var i, k, q;
+  for(i=0;i<inst7045.length;i++){ var e7=inst7045[i], best=null;
+    for(k=0;k<inst4697.length;k++){ var s4=inst4697[k];
+      if(s4.paired || Math.abs(s4.ms-e7.ms)>2000 || !nameTie(e7,s4,byName)) continue;
+      if(!best || Math.abs(s4.ms-e7.ms)<Math.abs(best.ms-e7.ms)) best=s4; }
+    if(best){ best.paired=true; e7.pair=best; } }
+  for(i=0;i<inst7045.length;i++){ var e8=inst7045[i]; if(e8.pair) continue;
+    var ck=normCmd(e8.image), cand=[];
+    if(!ck) continue;
+    for(k=0;k<inst4697.length;k++){ var s5=inst4697[k]; if(!s5.paired && Math.abs(s5.ms-e8.ms)<=2000 && normCmd(s5.image)===ck) cand.push(s5); }
+    if(cand.length!==1) continue;
+    var rev=0; for(q=0;q<inst7045.length;q++){ var o7=inst7045[q]; if(!o7.pair && Math.abs(cand[0].ms-o7.ms)<=2000 && normCmd(o7.image)===ck) rev++; }
+    if(rev===1){ cand[0].paired=true; e8.pair=cand[0]; } }
+}
+function addInstall(r,it){
+  var I=r.inst||(r.inst={count:0, firstMs:0, lastMs:0, first:"", last:"", n7045:0, n4697:0, by:{}, byList:[], userInstall:false, list:[]});
+  I.count++;
+  if(it.ev.id===7045){ I.n7045++; if(it.pair) I.n4697++; } else I.n4697++;
+  if(!I.firstMs || it.ev.ms<I.firstMs){ I.firstMs=it.ev.ms; I.first=it.ev.ts; }
+  if(it.ev.ms>=I.lastMs){ I.lastMs=it.ev.ms; I.last=it.ev.ts; }
+  var who=installerOf(it); it.who=who; it.rec=r;
+  if(!I.by.hasOwnProperty("#"+who.label)){ I.by["#"+who.label]=1; I.byList.push(who.label); }
+  if(who.isUser) I.userInstall=true;
+  I.list.push(it);
+}
+function buildModel(det, bat, sys, sec){
+  SVCS=[]; TL=[];
+  META={sources:{hive:!!det, systemLog:!!sys, securityLog:!!sec}, eventsOnly:!det, csCurrent:0, csSets:[], csUsed:0, hiveHost:"", evHost:"",
+        sysCover:null, sidNames:{}, n7045:0, n4697:0, n7040:0, nFail:0, nInst:0, hiveNewest:0, logOnly:0, oldSet:0, clusters:[]};
+  var r, i, k, rw;
+  // 1. batch value rows: current control set, ComputerName, ObjectName / FailureCommand / ServiceMain
+  var vals={}, cnames={};
+  if(bat){
+    var bD=gi(bat,"Description"), bK=gi(bat,"KeyPath"), bV=gi(bat,"ValueData");
+    for(r=1;r<bat.raw.length;r++){ rw=bat.raw[r];
+      var d=trimStr(cell(rw,bD)), kp=trimStr(cell(rw,bK)), vd=cell(rw,bV);
+      if(d==="Services" || !kp) continue;
+      var kl=kp.toLowerCase();
+      if(d==="CurrentControlSet"){ META.csCurrent=parseInt(vd,10)||0; continue; }
+      if(d==="ComputerName"){ var cm=kl.match(/controlset0*(\d+)/); cnames["#"+(cm?parseInt(cm[1],10):0)]=trimStr(vd); continue; }
+      if(d==="Service main") kl=kl.replace(/\\parameters$/,"");
+      var v=mget(vals,kl); if(!v){ v={}; mset(vals,kl,v); }
+      if(d==="Service account") v.acct=trimStr(vd);
+      else if(d==="Service failure command") v.fail=trimStr(vd);
+      else if(d==="Service main") v.main=trimStr(vd);
+    }
+  }
+  // 2. hive records from the Services plugin detail CSV, per control set
+  var byCs={}, csList=[];
+  if(det){
+    var iN=gi(det,"Name"), iB=gi(det,"BatchKeyPath"), iDs=gi(det,"Description"), iDn=gi(det,"DisplayName"), iSm=gi(det,"StartMode"),
+        iSt=gi(det,"ServiceType"), iLw=gi(det,"NameKeyLastWrite"), iPlw=gi(det,"ParametersKeyLastWrite"), iG=gi(det,"Group"),
+        iIp=gi(det,"ImagePath"), iDll=gi(det,"ServiceDLL"), iRp=gi(det,"RequiredPrivileges");
+    for(r=1;r<det.raw.length;r++){ rw=det.raw[r]; var nm=trimStr(cell(rw,iN)); if(!nm) continue;
+      var bkp=trimStr(cell(rw,iB)), csm=bkp.match(/ControlSet0*(\d+)/i), cs=csm?parseInt(csm[1],10):0;
+      var keyPath=bkp+"\\"+nm, vv=mget(vals,keyPath.toLowerCase())||{};
+      var rec=newRec({name:nm, disp:cell(rw,iDn), descr:cell(rw,iDs), start:normStart(cell(rw,iSm)), type:typeLabel(cell(rw,iSt)),
+        lw:trimStr(cell(rw,iLw)), plw:trimStr(cell(rw,iPlw)), group:cell(rw,iG), image:cell(rw,iIp), dll:cell(rw,iDll), privs:cell(rw,iRp),
+        acct:vv.acct||"", failCmd:vv.fail||"", svcMain:vv.main||"", cs:cs, keyPath:keyPath, src:"HIVE"});
+      if(!byCs.hasOwnProperty("#"+cs)){ byCs["#"+cs]=[]; csList.push(cs); }
+      byCs["#"+cs].push(rec);
+    }
+  }
+  csList.sort(function(a,b){ return a-b; });
+  META.csSets=csList;
+  var cur=(META.csCurrent && byCs.hasOwnProperty("#"+META.csCurrent)) ? META.csCurrent : (csList.length?csList[0]:0);
+  META.csUsed=cur;
+  META.hiveHost=cnames.hasOwnProperty("#"+cur)?cnames["#"+cur]:"";
+  if(!META.hiveHost){ for(k in cnames){ if(cnames.hasOwnProperty(k)){ META.hiveHost=cnames[k]; break; } } }
+  var byName={};
+  if(byCs.hasOwnProperty("#"+cur)){ var cl=byCs["#"+cur]; for(i=0;i<cl.length;i++){ SVCS.push(cl[i]); mset(byName,cl[i].nameL,cl[i]); } }
+  for(k=0;k<csList.length;k++){ var cs2=csList[k]; if(cs2===cur) continue; var ol=byCs["#"+cs2];
+    for(i=0;i<ol.length;i++){ var o=ol[i], m=mget(byName,o.nameL);
+      if(!m){ o.oldSet=true; SVCS.push(o); mset(byName,o.nameL,o); META.oldSet++; }       // only in a non-current control set
+      else if(m.cs===cur && !m.csdiff && (m.cmdKey!==o.cmdKey || m.dll.toLowerCase()!==o.dll.toLowerCase() || m.start!==o.start))
+        m.csdiff={cs:cs2, image:o.image, dll:o.dll, start:o.start, lw:o.lw};
+    } }
+  // 3. event-log rows
+  var inst7045=[], inst4697=[], chg=[], fails=[];
+  if(sys){
+    var sI=gi(sys,"EventId"), sT=gi(sys,"TimeCreated"), sU=gi(sys,"UserId"), sUn=gi(sys,"UserName"), sC=gi(sys,"Computer"), sP=gi(sys,"Payload"),
+        sX=gi(sys,"ExecutableInfo"), sR=gi(sys,"RecordNumber"), sP1=gi(sys,"PayloadData1"), sP2=gi(sys,"PayloadData2"), sP3=gi(sys,"PayloadData3");
+    var comps={};
+    for(r=1;r<sys.raw.length;r++){ rw=sys.raw[r]; var id=parseInt(cell(rw,sI),10); if(!id) continue;
+      var ts=trimStr(cell(rw,sT)), ms=msOf(ts); if(!ms) continue;
+      if(!META.sysCover) META.sysCover={min:ms,max:ms}; else { if(ms<META.sysCover.min) META.sysCover.min=ms; if(ms>META.sysCover.max) META.sysCover.max=ms; }
+      var compn=trimStr(cell(rw,sC)).split(".")[0].toUpperCase(); if(compn) comps["#"+compn]=(comps.hasOwnProperty("#"+compn)?comps["#"+compn]:0)+1;
+      var pl=payloadOf(cell(rw,sP)), pd=pl.d;
+      var ev={id:id, ts:ts, ms:ms, recNo:cell(rw,sR), sid:trimStr(cell(rw,sU)), user:trimStr(cell(rw,sUn)), comp:trimStr(cell(rw,sC))};
+      if(id===7045){
+        ev.name=pv(pd,"ServiceName")||labelVal(cell(rw,sP1),"Name");
+        ev.image=pd.hasOwnProperty("ImagePath")?pd.ImagePath:decodeEnt(cell(rw,sX));
+        ev.stype=pv(pd,"ServiceType"); ev.start=pv(pd,"StartType")||labelVal(cell(rw,sP2),"StartType");
+        ev.acct=pv(pd,"AccountName")||labelVal(cell(rw,sP3),"Account");
+        inst7045.push(ev);
+      } else if(id===7040){
+        ev.name=pv(pd,"param4")||trimStr(cell(rw,sX)); ev.disp=pv(pd,"param1"); ev.from=pv(pd,"param2"); ev.to=pv(pd,"param3");
+        ev.text=trimStr(decodeEnt(cell(rw,sP1)))||("The start type of the "+ev.disp+" service was changed from "+ev.from+" to "+ev.to);
+        chg.push(ev);
+      } else {
+        ev.name=pl.bin; ev.disp=failDisp(id,pd); ev.text=failText(id,pd,cell(rw,sP1)); fails.push(ev);
+      }
+    }
+    var bn=0; for(k in comps){ if(comps.hasOwnProperty(k) && comps[k]>bn){ bn=comps[k]; META.evHost=k.substring(1); } }
+  }
+  if(sec){
+    var qI=gi(sec,"EventId"), qT=gi(sec,"TimeCreated"), qP=gi(sec,"Payload"), qUn=gi(sec,"UserName"), qR=gi(sec,"RecordNumber");
+    for(r=1;r<sec.raw.length;r++){ rw=sec.raw[r]; if(parseInt(cell(rw,qI),10)!==4697) continue;
+      var ts2=trimStr(cell(rw,qT)), ms2=msOf(ts2); if(!ms2) continue;
+      var pd2=payloadOf(cell(rw,qP)).d;
+      var u=(pv(pd2,"SubjectDomainName")?(pv(pd2,"SubjectDomainName")+"\\"):"")+pv(pd2,"SubjectUserName");
+      if(!pv(pd2,"SubjectUserName")) u=trimStr(cell(rw,qUn));
+      var ev2={id:4697, ts:ts2, ms:ms2, recNo:cell(rw,qR), sid:pv(pd2,"SubjectUserSid"), user:u, logonId:pv(pd2,"SubjectLogonId"),
+        name:pv(pd2,"ServiceName"), image:pv(pd2,"ServiceFileName"), stype:pv(pd2,"ServiceType"), start:pv(pd2,"ServiceStartType"), acct:pv(pd2,"ServiceAccount")};
+      if(ev2.sid && ev2.user) META.sidNames[ev2.sid]=ev2.user;
+      inst4697.push(ev2);
+    }
+  }
+  META.n7045=inst7045.length; META.n4697=inst4697.length; META.n7040=chg.length; META.nFail=fails.length;
+  // 4. join installs to hive records
+  var byDisp={}, byCmd={};
+  for(i=0;i<SVCS.length;i++){ var h=SVCS[i];
+    if(h.disp && h.disp.charAt(0)!=="@" && !mget(byDisp,h.disp.toLowerCase())) mset(byDisp,h.disp.toLowerCase(),h);
+    if(h.cmdKey){ var bl=mget(byCmd,h.cmdKey); if(!bl){ bl=[]; mset(byCmd,h.cmdKey,bl); } bl.push(h); } }
+  inst7045.sort(byMs); inst4697.sort(byMs);
+  pairInstalls(inst7045, inst4697, byName);
+  var installs=[];
+  for(i=0;i<inst7045.length;i++) installs.push({ev:inst7045[i], pair:inst7045[i].pair||null, keyName:inst7045[i].pair?inst7045[i].pair.name:""});
+  for(k=0;k<inst4697.length;k++){ if(!inst4697[k].paired) installs.push({ev:inst4697[k], pair:null, keyName:inst4697[k].name}); }
+  installs.sort(function(a,b){ return a.ev.ms-b.ev.ms; });
+  META.nInst=installs.length;
+  var logOnly={};
+  for(i=0;i<installs.length;i++){ var it=installs[i], hit=resolveInstall(it, byName, byDisp, byCmd);
+    if(hit){ addInstall(hit,it); if(hit.src==="HIVE") hit.src="HIVE+LOG"; continue; }
+    var nmk=it.keyName||String(it.ev.name||"(unnamed)"), lo=mget(logOnly,nmk.toLowerCase());
+    if(!lo){
+      lo=newRec({name:nmk, disp:(it.keyName && it.keyName.toLowerCase()!==String(it.ev.name).toLowerCase())?it.ev.name:"",
+        start:normStart(it.ev.start), type:typeLabel(it.ev.stype), acct:it.ev.acct, image:it.ev.image, src:"LOG-ONLY"});
+      mset(logOnly,nmk.toLowerCase(),lo); SVCS.push(lo); META.logOnly++;
+      if(!mget(byName,lo.nameL)) mset(byName,lo.nameL,lo);
+      if(lo.disp && !mget(byDisp,lo.disp.toLowerCase())) mset(byDisp,lo.disp.toLowerCase(),lo);
+      if(!mget(byDisp,String(it.ev.name).toLowerCase())) mset(byDisp,String(it.ev.name).toLowerCase(),lo);
+    }
+    addInstall(lo,it);
+  }
+  /* a LOG-ONLY record shows its NEWEST install's configuration. Repeat installs usually arrive through byName /
+     byDisp (resolveInstall), not the creation branch above, so this runs over the final install list. Every
+     image is still scored (finalizeRec). */
+  for(k in logOnly){ if(!logOnly.hasOwnProperty(k)) continue;
+    var lr=logOnly[k], nw=null;
+    for(i=0;i<lr.inst.list.length;i++){ var ie=lr.inst.list[i].ev; if(!nw || ie.ms>=nw.ms) nw=ie; }
+    if(!nw) continue;
+    if(trimStr(nw.image||"")) lr.image=nw.image;
+    var nst=normStart(nw.start); if(nst) lr.start=nst;
+    if(trimStr(nw.acct||"")) lr.acct=trimStr(nw.acct);
+    var nty=typeLabel(nw.stype); if(nty) lr.type=nty;
+    lr.cmdKey=normCmd(lr.image); }
+  // 5. start-type changes and SCM failures attach by key name (7040 param4 / failure Binary), else display name
+  for(i=0;i<chg.length;i++){ var c7=chg[i], t7=mget(byName,String(c7.name).toLowerCase())||(c7.disp?mget(byDisp,c7.disp.toLowerCase()):null);
+    c7.recRef=t7; if(t7){ if(!t7.chg) t7.chg=[]; t7.chg.push(c7); if(/disabled/i.test(c7.to)) t7.toDisabled=true; } }
+  for(i=0;i<fails.length;i++){ var f7=fails[i], t8=(f7.name?mget(byName,f7.name.toLowerCase()):null)
+      || (f7.disp?(mget(byDisp,f7.disp.toLowerCase())||mget(byName,f7.disp.toLowerCase())):null);
+    f7.recRef=t8; if(t8){ if(!t8.fails) t8.fails=[]; t8.fails.push(f7); } }
+  // 6. BULK (servicing rewrites), recency anchor, clusters
+  var hv=[]; for(i=0;i<SVCS.length;i++){ if(SVCS[i].src!=="LOG-ONLY" && SVCS[i].lwMs) hv.push(SVCS[i]); }
+  hv.sort(function(a,b){ return a.lwMs-b.lwMs; });
+  var lo2=0, hi2=0, n=hv.length;
+  for(i=0;i<n;i++){ var x=hv[i].lwMs;
+    while(hv[lo2].lwMs < x-BULK_MS) lo2++;
+    if(hi2<i) hi2=i; while(hi2+1<n && hv[hi2+1].lwMs<=x+BULK_MS) hi2++;
+    hv[i].bulk=(hi2-lo2+1)>=BULK_N;
+    if(x>META.hiveNewest) META.hiveNewest=x; }
+  var clusters=[], curC=null;
+  for(i=0;i<n;i++){ var hb=hv[i]; if(!hb.bulk) continue;
+    if(curC && hb.lwMs-curC.lastMs<=BULK_MS){ curC.recs.push(hb); curC.lastMs=hb.lwMs; curC.last=hb.lw; }
+    else { curC={firstMs:hb.lwMs, lastMs:hb.lwMs, first:hb.lw, last:hb.lw, recs:[hb]}; clusters.push(curC); } }
+  META.clusters=clusters;
+  for(i=0;i<SVCS.length;i++) finalizeRec(SVCS[i]);
+  buildTimeline(installs, chg, fails, clusters);
+}
+function finalizeRec(r){
+  var seen={}, list=[], i;
+  function addCmd(raw){ raw=String(raw||""); if(!trimStr(raw)) return; var c=splitCmd(raw); if(seen.hasOwnProperty("#"+c.key)) return; seen["#"+c.key]=1; list.push(c); }
+  if(r.src==="LOG-ONLY" && r.inst){ for(i=0;i<r.inst.list.length;i++) addCmd(r.inst.list[i].ev.image); }
+  else addCmd(r.image);
+  r.cmds=list;
+  /* shown binary = the hive image, or (LOG-ONLY) the NEWEST install's image - taken from r.image, never from the
+     de-duplicated list, whose order is first-seen (A -> B -> A would otherwise show B) */
+  r.main=trimStr(r.image)?splitCmd(r.image):(list.length?list[list.length-1]:splitCmd(""));
+  r.failC=r.failCmd?splitCmd(r.failCmd):null;
+  r.dlls=parseDlls(r.dll);
+  r.dllDisp=r.dlls.join(" | ");
+  r.dllL=r.dlls.length?expandEnv(r.dlls[0]).toLowerCase():"";
+  r.tclass=typeClass(r.type);
+  r.acctDisp=trimStr(r.acct)||"(drivers / no account)";
+  r.recent=!!(r.lwMs && !r.bulk && META.hiveNewest && r.lwMs>=META.hiveNewest-RECENT_DAYS*86400000);
+  /* E3 is Win32-only (drivers are mostly installed by PnP, which never logs a 7045) and skips keys whose write a
+     logged 7040 start-type change already explains (BITS flaps its Start value hundreds of times) */
+  r.no7045=!!(r.src==="HIVE" && !r.oldSet && r.tclass==="win32" && !r.bulk && !r.chg && r.lwMs && META.sysCover && r.lwMs>=META.sysCover.min && r.lwMs<=META.sysCover.max);
+  r.nosvc=false;
+  if(r.inst && r.fails){ for(var a=0;a<r.fails.length && !r.nosvc;a++){ var f=r.fails[a]; if(f.id!==7000 && f.id!==7009) continue;
+    for(var b=0;b<r.inst.list.length;b++){ var im=r.inst.list[b].ev.ms; if(f.ms>=im && f.ms<=im+60000){ r.nosvc=true; break; } } } }
+  var days=[]; if(r.lwDay) days.push(r.lwDay);
+  if(r.inst) for(i=0;i<r.inst.list.length;i++) days.push(dayOf(r.inst.list[i].ev.ts));
+  if(r.chg) for(i=0;i<r.chg.length;i++) days.push(dayOf(r.chg[i].ts));
+  if(r.fails) for(i=0;i<r.fails.length;i++) days.push(dayOf(r.fails[i].ts));
+  r.days=days;
+  r.instBy=r.inst?r.inst.byList.join(", "):"";
+  var imgs=[]; for(i=0;i<list.length;i++) imgs.push(list[i].raw);
+  r.iocBlob=[r.name, r.disp, imgs.join(" "), r.dllDisp, r.failCmd, r.acct].join(" ").toLowerCase();
+  r.blob=[r.name, r.disp, r.descr, r.start, r.type, r.acctDisp, imgs.join(" "), r.dllDisp, r.failCmd, r.svcMain, r.group, r.src, r.instBy, r.keyPath].join(" ").toLowerCase();
+  if(r.oldSet) r.blob+=" oldset controlset00"+r.cs;
+}
+function cmdLabel(raw){ return clip(decodeEnt(raw),160); }
+function buildTimeline(installs, chg, fails, clusters){
+  TL=[];
+  var i, g, k, map={};
+  for(i=0;i<installs.length;i++){ var it=installs[i], e=it.ev;
+    TL.push({ms:e.ms, ts:e.ts, kind:(e.id===7045?(it.pair?"Install 7045+4697":"Install 7045"):"Install 4697"),
+      svc:it.rec?it.rec.name:(it.keyName||e.name), detail:String(e.name)+" | "+cmdLabel(e.image)+" | start "+(normStart(e.start)||"?")+" | account "+(e.acct||"?")+" | by "+it.who.label,
+      count:1, rec:it.rec||null, inst:it}); }
+  // 7040 collapsed per service per day (BITS alone flaps hundreds of times)
+  for(i=0;i<chg.length;i++){ var c=chg[i], key=(c.recRef?c.recRef.nameL:String(c.name).toLowerCase())+"|7040|"+dayOf(c.ts);
+    g=mget(map,key);
+    if(!g){ g={ms:c.ms, ts:c.ts, kind:"Start type 7040", svc:c.recRef?c.recRef.name:(c.name||c.disp), detail:c.text, count:0, rec:c.recRef||null, evs:[]}; mset(map,key,g); TL.push(g); }
+    g.count++; g.evs.push(c); if(c.ms<g.ms){ g.ms=c.ms; g.ts=c.ts; } g.detail=c.text; }
+  for(i=0;i<fails.length;i++){ var f=fails[i], key2=(f.recRef?f.recRef.nameL:String(f.name||f.disp).toLowerCase())+"|"+f.id+"|"+dayOf(f.ts);
+    g=mget(map,key2);
+    if(!g){ g={ms:f.ms, ts:f.ts, kind:failKind(f.id), svc:f.recRef?f.recRef.name:(f.name||f.disp), detail:f.text, count:0, rec:f.recRef||null, evs:[]}; mset(map,key2,g); TL.push(g); }
+    g.count++; g.evs.push(f); if(f.ms<g.ms){ g.ms=f.ms; g.ts=f.ts; } }
+  for(i=0;i<SVCS.length;i++){ var r=SVCS[i]; if(!r.lwMs || r.bulk) continue;
+    TL.push({ms:r.lwMs, ts:r.lw, kind:"Key write", svc:r.name, detail:"service key last written"+(r.oldSet?(" (ControlSet00"+r.cs+" only)"):"")+" | "+(r.start||"?")+" | "+(r.main.bin||"(no image path)"),
+      count:1, rec:r}); }
+  for(k=0;k<clusters.length;k++){ var cl=clusters[k], names=[];
+    for(i=0;i<cl.recs.length && i<4;i++) names.push(cl.recs[i].name);
+    TL.push({ms:cl.firstMs, ts:cl.first, kind:"Bulk key write", svc:nf(cl.recs.length)+" service keys",
+      detail:nf(cl.recs.length)+" service keys rewritten within "+Math.max(1,Math.round((cl.lastMs-cl.firstMs)/1000))+" s - servicing / bulk update, not install times ("+names.join(", ")+(cl.recs.length>4?", \u2026":"")+")",
+      count:cl.recs.length, rec:null, cluster:cl}); }
+  for(i=0;i<TL.length;i++){ var t=TL[i]; t.day=dayOf(t.ts); t.blob=(t.kind+" "+t.svc+" "+t.detail).toLowerCase(); }
+}
+
+/* ---------- suspicion scoring (SPEC section 7; sus = score >= 3; the case window is NEVER an input) ---------- */
+function hasTag(r,t){ for(var i=0;i<r.tags.length;i++){ if(r.tags[i]===t) return true; } return false; }
+function rescoreAll(){ for(var i=0;i<SVCS.length;i++) scoreRec(SVCS[i]); }
+function scoreRec(r){
+  var tags=[], reasons=[], score=0, ctx=[], i;
+  function add(tag, pts, why){ for(var q=0;q<tags.length;q++){ if(tags[q]===tag) return; } tags.push(tag); score+=pts; reasons.push(why+" (+"+pts+" "+tag+")"); }
+  function cmdRules(c, what, isFail){
+    if(isUserPath(c.binL)) add("USERPATH",3,what+" binary is in a user-writable folder: "+c.bin);
+    if(isLolbin(c) && !(isFail && vendorRecoveryBat(c))) add("LOLBIN",3,what+" binary is an interpreter / LOLBin: "+baseName(c.bin));
+    if(REMOTE_EXEC_RE.test(c.raw) || REMOTE_EXEC_RE.test(c.exp)) add("REMOTE-EXEC",3,what+" command line carries remote-execution tradecraft (loopback / admin-share UNC, cmd /Q /c, echo > ... & del, encoded PowerShell)");
+  }
+  // S1 IOC / keyword hit
+  if(IOCS.length){ var hits=[];
+    for(i=0;i<IOCS.length;i++){ if(r.iocBlob.indexOf(IOCS[i])>=0){ hits.push(IOCS[i]); if(hits.length>=3) break; } }
+    if(hits.length) add("IOC",3,"IOC/keyword hit: "+hits.join(", ")); }
+  // S2-S4 on every image this service has had (hive image, or each logged install image)
+  for(i=0;i<r.cmds.length;i++) cmdRules(r.cmds[i], r.src==="LOG-ONLY"?"Installed":"Service");
+  // S5 known remote-exec / offensive default service names (dual-use - a review flag)
+  if(TOOLNAME_RE.test(r.name)) add("TOOLNAME",2,"Service name is a known remote-execution tool default ("+r.name+")");
+  // S6 ServiceDLL outside system32 / Program Files / DriverStore / Defender platform
+  for(i=0;i<r.dlls.length;i++){ var dl=expandEnv(r.dlls[i]).toLowerCase();
+    if(isUserPath(dl)) add("USERPATH",3,"ServiceDLL is in a user-writable folder: "+r.dlls[i]);   // S2 covers the ServiceDLL too
+    if(!okDll(dl)) add("SVCDLL",2,"ServiceDLL outside system32 / Program Files: "+r.dlls[i]); }
+  // S7 driver image outside system32\drivers / DriverStore / Program Files (BYOVD staging)
+  if(r.tclass==="driver"){ for(i=0;i<r.cmds.length;i++){ if(r.cmds[i].binL && !okDrv(r.cmds[i].binL)){ add("DRVPATH",2,"Driver image outside system32\\drivers / DriverStore: "+r.cmds[i].bin); break; } } }
+  // S8 recovery program (plus S2-S4 on its binary)
+  if(r.failC){ add("FAILCMD",1,"FailureCommand (recovery program) set: "+r.failCmd); cmdRules(r.failC,"FailureCommand",true); }
+  // S9 a real run-as account
+  if(r.acct && !OK_ACCOUNT_RE.test(trimStr(r.acct))) add("ACCOUNT",1,"Runs as a real account, not a built-in service identity: "+r.acct);
+  // S10 random-looking name
+  if(isRandName(r.name)) add("RANDNAME",1,"Random-looking service name (Impacket / Metasploit style)");
+  // S11 security / logging service disabled
+  if(DEFENSE_SVCS.hasOwnProperty(r.nameL) && (r.start==="Disabled" || r.toDisabled))
+    add("DEFENSE-OFF",2,"Security / logging service "+(r.start==="Disabled"?"is Disabled in the hive":"was switched to disabled (7040)")+" - legitimate for Defender beside third-party AV");
+  // S12 only in a non-current control set
+  if(r.oldSet) add("OLDSET",1,"Only in ControlSet00"+r.cs+" - not in the current control set (removed from the live config)");
+  // E1 transient / deleted (not scored in events-only mode, where every install is log-only by definition)
+  if(r.src==="LOG-ONLY" && !META.eventsOnly) add("LOG-ONLY",1,"Installed per the event log ("+(r.inst?r.inst.count:0)+"x), but no matching service key in the SYSTEM hive - transient or deleted");
+  // E2 installed by a user account
+  if(r.inst && r.inst.userInstall) add("USER-INSTALL",2,"Installed by a user account (not SYSTEM / a machine account): "+r.instBy);
+  // E3 lone key write inside the System log's coverage, no install event (direct registry write or a cleared log)
+  if(r.no7045) add("NO7045",1,"Service key written "+r.lw+" (inside the System log's coverage) with no install event - created by a direct registry write, or the log was cleared");
+  // E4 start failure right after install - the binary is not a real service
+  if(r.nosvc) add("NOSVC",1,"7000 / 7009 start failure within 60 s of its install - the binary is not a real service (typical of one-shot command services)");
+  // M1 lone recent key write (the hive's own clock, never the case window)
+  if(r.recent && !r.no7045) add("RECENT",1,"Lone key write within "+RECENT_DAYS+" days of the hive's newest service-key write");   // NO7045 already counts this same write
+  // M2 autostart amplifier
+  if(isAutostart(r.start) && (hasTag({tags:tags},"USERPATH")||hasTag({tags:tags},"LOLBIN")||hasTag({tags:tags},"REMOTE-EXEC")||hasTag({tags:tags},"SVCDLL")||hasTag({tags:tags},"DRVPATH")))
+    add("AUTOSTART",1,"Starts automatically ("+r.start+") with a suspicious binary");
+  if(r.bulk) ctx.push("BULK");
+  if(r.csdiff) ctx.push("CSDIFF");
+  r.tags=tags; r.ctx=ctx; r.reasons=reasons; r.score=score; r.sus=(score>=3);
+}
+
+/* ---------- ingest -> UI ---------- */
+/* the model is already replaced by the time an empty load is detected - so clear EVERYTHING derived from the
+   previous load (table, cached view rows, overview, detail), or Export would write the previous host's services */
+function clearResults(msg){
+  SVCS=[]; TL=[]; window.__viewRows=[]; DETREC=null; DETTL=null;
+  $("tbl").innerHTML=""; $("statbar").innerHTML=""; $("count").innerHTML="";
+  $("topExes").innerHTML=""; $("topNew").innerHTML=""; $("topSus").innerHTML="";
+  closeDetail(); $("hostWarn").innerHTML=""; showEl("hostWarn",false);
+  $("results").className="hide"; $("srcpill").innerHTML="no data loaded";
+  if(msg) setStatus(msg,"err");
+}
+function ingestServices(det, bat, sys, sec, label){
+  buildModel(det, bat, sys, sec);
+  if(!SVCS.length && !TL.length){ clearResults("Nothing to show - the loaded CSVs held no services and no service events (previous results cleared)"); return false; }
+  rescoreAll();
+  setMode("svc");
+  populateSourceFilter([]);
+  USERFILTER="";
+  var av=[]; for(var i=0;i<SVCS.length;i++) av.push(SVCS[i].acctDisp);
+  populateUserFilter(distinctVals(av));
+  $("results").className="";
+  $("srcpill").innerHTML=nf(SVCS.length)+" services &middot; "+esc(sourcesText())+" &middot; "+esc(label||"");
+  QUERY=""; $("q").value=""; DFROM=CASE_FROM?dayNum(CASE_FROM):0; DTO=CASE_TO?dayNum(CASE_TO):0; $("dfrom").value=CASE_FROM||""; $("dto").value=CASE_TO||"";
+  CURCAT="all"; TYPEF="all"; STARTF="all"; SRCF="all"; highlightChips();
+  SORTKEY=0; SORTDIR=1; TSORTKEY=0; TSORTDIR=-1; ASORTKEY=1; ASORTDIR=-1;
+  setView("svc", true);
+  closeDetail();
+  hostCheck();
+  setStatus("Loaded - "+loadSummaryText(),"ok");
+  render();
+  return true;
+}
+function sourcesText(){ var s=META.sources||{};
+  return "hive "+(s.hive?"yes":"no")+" / System log "+(s.systemLog?"yes":"no")+" / Security log "+(s.securityLog?"yes":"no"); }
+function loadSummaryText(){
+  var flagged=0, i; for(i=0;i<SVCS.length;i++){ if(SVCS[i].sus) flagged++; }
+  var t=nf(SVCS.length)+" services";
+  if(META.csUsed) t+=" (ControlSet00"+META.csUsed+(META.oldSet?(", +"+META.oldSet+" only in another set"):"")+")";
+  if(META.sources.systemLog || META.sources.securityLog)
+    t+="; installs "+nf(META.n7045)+" x 7045 / "+nf(META.n4697)+" x 4697, "+nf(META.logOnly)+" log-only; "+nf(META.n7040)+" start-type changes";
+  t+="; "+nf(flagged)+" flagged.";
+  if(META.eventsOnly) t+=" Events-only (no hive): every install is log-only by definition, so LOG-ONLY is not scored.";
+  else if(!META.sources.systemLog && !META.sources.securityLog) t+=" Hive-only (no event logs): no install history, LOG-ONLY / USER-INSTALL cannot fire.";
+  return t;
+}
+/* the loaded data names a computer - warn (never block, never overwrite) when it differs from the field */
+function hostCheck(){
+  var el=$("hostWarn"); if(!el) return;
+  var f=sanitHost($("hostName").value).toLowerCase(), hh=String(META.hiveHost||""), eh=String(META.evHost||""), bad=[];
+  if(f && hh && sanitHost(hh).toLowerCase()!==f) bad.push("hive ComputerName "+hh);
+  if(f && eh && sanitHost(eh).toLowerCase()!==f && sanitHost(eh).toLowerCase()!==sanitHost(hh).toLowerCase()) bad.push("event-log Computer "+eh);
+  if(!bad.length){ el.innerHTML=""; showEl("hostWarn",false); return; }
+  el.innerHTML="&#9888; "+esc(bad.join(" / "))+" &ne; "+esc($("hostName").value);
+  el.title="The loaded data names a different computer than the Target hostname field. Outputs are filed under the field's value - check you picked the right host (or that the field was overwritten on purpose).";
+  showEl("hostWarn",true);
+}
+
+/* ---------- filters ---------- */
+function passRecBase(r){   // everything except the date window and the search box
+  if(USERFILTER && r.acctDisp!==USERFILTER) return false;
+  if(CURCAT==="sus"){ if(!r.sus) return false; } else if(CURCAT!=="all"){ if(!hasTag(r,CURCAT)) return false; }
+  if(TYPEF!=="all" && r.tclass!==TYPEF) return false;
+  if(STARTF==="auto" && !isAutostart(r.start)) return false;
+  if(STARTF==="manual" && r.start!=="Manual") return false;
+  if(STARTF==="disabled" && r.start!=="Disabled") return false;
+  if(SRCF==="hive" && r.src!=="HIVE") return false;
+  if(SRCF==="hivelog" && r.src!=="HIVE+LOG") return false;
+  if(SRCF==="logonly" && r.src!=="LOG-ONLY") return false;
+  return true;
+}
+function baseFiltersActive(){ return !!(USERFILTER || CURCAT!=="all" || TYPEF!=="all" || STARTF!=="all" || SRCF!=="all"); }
+function passDate(days){ if(!DFROM && !DTO) return true;
+  for(var i=0;i<days.length;i++){ var d=days[i]; if(!d) continue; if((!DFROM||d>=DFROM) && (!DTO||d<=DTO)) return true; }
+  return false; }
+function filteredSvcs(){ var out=[];
+  for(var i=0;i<SVCS.length;i++){ var r=SVCS[i];
+    if(!passRecBase(r)) continue;
+    if(!passDate(r.days)) continue;
+    if(QUERY && r.blob.indexOf(QUERY)<0) continue;
+    out.push(r); }
+  return out; }
+function filteredTl(){ var out=[], act=baseFiltersActive();
+  for(var i=0;i<TL.length;i++){ var t=TL[i];
+    if(t.rec){ if(!passRecBase(t.rec)) continue; } else if(act) continue;   // unlinked rows (bulk clusters, unmatched events) only when no record filter is set
+    if(!passDate([t.day])) continue;
+    if(QUERY && t.blob.indexOf(QUERY)<0 && !(t.rec && t.rec.blob.indexOf(QUERY)>=0)) continue;
+    out.push(t); }
+  return out; }
+function chipCounts(){
+  var c={cat:{all:SVCS.length, sus:0}, tf:{all:SVCS.length, win32:0, driver:0}, sf:{all:SVCS.length, auto:0, manual:0, disabled:0}, rf:{all:SVCS.length, hive:0, hivelog:0, logonly:0}}, i, j;
+  for(i=0;i<SVCS.length;i++){ var r=SVCS[i];
+    if(r.sus) c.cat.sus++;
+    for(j=0;j<r.tags.length;j++){ var g=r.tags[j]; c.cat[g]=(c.cat.hasOwnProperty(g)?c.cat[g]:0)+1; }
+    c.tf[r.tclass]++;
+    if(isAutostart(r.start)) c.sf.auto++; else if(r.start==="Manual") c.sf.manual++; else if(r.start==="Disabled") c.sf.disabled++;
+    if(r.src==="HIVE") c.rf.hive++; else if(r.src==="HIVE+LOG") c.rf.hivelog++; else c.rf.logonly++; }
+  return c;
+}
+var CHIPSETS=[{box:"pfCats", attr:"data-cat", key:"cat"},{box:"pfFilt", attr:"data-tf", key:"tf"},{box:"pfFilt", attr:"data-sf", key:"sf"},{box:"pfFilt", attr:"data-rf", key:"rf"}];
+function chipVal(key){ return key==="cat"?CURCAT:(key==="tf"?TYPEF:(key==="sf"?STARTF:SRCF)); }
+function highlightChips(){
+  for(var s=0;s<CHIPSETS.length;s++){ var cs=CHIPSETS[s], bs=$(cs.box).getElementsByTagName("button");
+    for(var j=0;j<bs.length;j++){ var v=bs[j].getAttribute(cs.attr); if(v) bs[j].className=(v===chipVal(cs.key))?"btn sm on":"btn sm"; } } }
+function updateChipCounts(){
+  var c=chipCounts();
+  for(var s=0;s<CHIPSETS.length;s++){ var cs=CHIPSETS[s], bs=$(cs.box).getElementsByTagName("button"), cnt=c[cs.key];
+    for(var j=0;j<bs.length;j++){ var v=bs[j].getAttribute(cs.attr); if(!v) continue;
+      var lab=bs[j].getAttribute("data-lab"); if(!lab){ lab=bs[j].innerHTML.replace(/\s*\(\d[\d,]*\)$/,""); bs[j].setAttribute("data-lab",lab); }
+      bs[j].innerHTML=lab+" ("+nf(cnt.hasOwnProperty(v)?cnt[v]:0)+")"; } } }
+
+/* ---------- overview ---------- */
+function stat(n,l){ return '<span class="stat"><span class="n">'+esc(n)+'</span><span class="l">'+esc(l)+'</span></span>'; }
+function bar(label,frac,val,q){
+  var lc=q?' lnk" data-q="'+esc(q):'';
+  return '<div class="brow"><span class="blab'+lc+'" title="'+esc(label)+'">'+esc(label)+'</span>'
+    +'<span class="btrack"><span class="bfill" style="width:'+(frac*100).toFixed(1)+'%"></span></span>'
+    +'<span class="bval">'+esc(val)+'</span></div>';
+}
+function listRow(label,val,q,cls){
+  var lc=q?' lnk" data-q="'+esc(q):'';
+  return '<div class="brow"><span class="blab'+lc+'" title="'+esc(label)+'" style="width:52%">'+esc(label)+'</span>'
+    +'<span class="bval" style="width:44%;'+(cls||"")+'">'+esc(val)+'</span></div>';
+}
+function fmtShortTs(s){ var m=String(s).match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/); return m?(m[1]+" "+m[2]):String(s); }
+function msToTs(ms){ var d=new Date(ms); function p(x){return (x<10?"0":"")+x;}
+  return d.getUTCFullYear()+"-"+p(d.getUTCMonth()+1)+"-"+p(d.getUTCDate())+" "+p(d.getUTCHours())+":"+p(d.getUTCMinutes())+":"+p(d.getUTCSeconds()); }
+function renderAgg(rows){
+  var i, r, win=0, drv=0, auto=0, inst=0, lo=0, sus=0, ioc=0;
+  for(i=0;i<rows.length;i++){ r=rows[i];
+    if(r.tclass==="driver") drv++; else win++;
+    if(isAutostart(r.start)) auto++;
+    if(r.inst) inst+=r.inst.count;
+    if(r.src==="LOG-ONLY") lo++;
+    if(r.sus) sus++;
+    if(hasTag(r,"IOC")) ioc++; }
+  var cov=META.sysCover?(fmtShortTs(msToTs(META.sysCover.min))+" \u2192 "+fmtShortTs(msToTs(META.sysCover.max))):"\u2014";
+  $("statbar").innerHTML=stat(nf(rows.length),"services")+stat(nf(win),"win32")+stat(nf(drv),"drivers")+stat(nf(auto),"autostart")
+    +stat(nf(inst),"installs logged")+stat(nf(lo),"log-only")+stat(nf(sus),"suspicious")+(IOCS.length?stat(nf(ioc),"IOC hits"):"")
+    +'<span class="stat" style="min-width:250px"><span class="n" style="font-size:12px">'+esc(sourcesText())+'</span><span class="l">sources</span></span>'
+    +'<span class="stat" style="min-width:250px"><span class="n" style="font-size:12px">'+esc(cov)+'</span><span class="l">System log coverage (UTC)</span></span>'
+    +(META.hiveHost?('<span class="stat"><span class="n" style="font-size:12px">'+esc(META.hiveHost)+'</span><span class="l">hive ComputerName</span></span>'):"");
+  // col 1: installs by service
+  var ins=[]; for(i=0;i<rows.length;i++){ if(rows[i].inst) ins.push(rows[i]); }
+  ins.sort(function(a,b){ return b.inst.count-a.inst.count || b.inst.lastMs-a.inst.lastMs; });
+  var h="", max=ins.length?ins[0].inst.count:1;
+  for(i=0;i<ins.length&&i<12;i++){ r=ins[i]; h+=bar(r.name+(r.src==="LOG-ONLY"?"  [log-only]":""), max?r.inst.count/max:0, "x"+nf(r.inst.count), r.name); }
+  $("topExes").innerHTML=h||'<span class="muted">'+((META.sources.systemLog||META.sources.securityLog)?"no installs in the logs":"no event logs loaded")+'</span>';
+  // col 2: newest LONE key writes (bulk servicing rewrites excluded)
+  var lw=[]; for(i=0;i<rows.length;i++){ if(rows[i].lwMs && !rows[i].bulk) lw.push(rows[i]); }
+  lw.sort(function(a,b){ return b.lwMs-a.lwMs; });
+  h=""; for(i=0;i<lw.length&&i<12;i++){ r=lw[i]; h+=listRow(r.name, fmtShortTs(r.lw), r.name); }
+  $("topNew").innerHTML=h||'<span class="muted">none</span>';
+  // col 3: suspicious, score-ranked
+  var sv=[]; for(i=0;i<rows.length;i++){ if(rows[i].sus) sv.push(rows[i]); }
+  sv.sort(function(a,b){ return b.score-a.score || b.lwMs-a.lwMs; });
+  h=""; for(i=0;i<sv.length&&i<12;i++){ r=sv[i]; h+=listRow(r.name+"  ["+r.tags.join(",")+"]", "score "+r.score, r.name, "color:#ff6b6b"); }
+  $("topSus").innerHTML=h||'<span class="ok">No suspicious services</span>';
+}
+
+/* ---------- services table ---------- */
+function clip(s,n){ s=String(s==null?"":s); return s.length>n?(s.substring(0,n)+"\u2026"):s; }
+var TAGCLS={"IOC":"ioc","REMOTE-EXEC":"ioc","TOOLNAME":"ioc","USERPATH":"usr","USER-INSTALL":"usr","ACCOUNT":"usr","LOLBIN":"lol","SVCDLL":"lol",
+  "DRVPATH":"lol","FAILCMD":"lol","LOG-ONLY":"rare","NO7045":"rare","NOSVC":"rare","OLDSET":"rare","RANDNAME":"rare","DEFENSE-OFF":"rare"};
+var CTXWHY={"BULK":"Key LastWrite falls in a bulk rewrite (>= 10 service keys within +-2 s - Windows servicing / an installer). Context only: it is not an install time and never counts as recent.",
+  "CSDIFF":"The other control set holds a different ImagePath / ServiceDLL / start mode for this service - see the detail pane. Context only."};
+function tagHtml(r){
+  var t="", i, why=esc(r.reasons.join("; "));
+  if(r.sus) t+='<span class="tag sus" title="'+why+'">SUS '+r.score+'</span>';
+  for(i=0;i<r.tags.length;i++){ var g=r.tags[i]; t+='<span class="tag '+(TAGCLS.hasOwnProperty(g)?TAGCLS[g]:"gen")+'" title="'+why+'">'+esc(g)+'</span>'; }
+  for(i=0;i<r.ctx.length;i++) t+='<span class="tag ctx" title="'+esc(CTXWHY[r.ctx[i]]||"")+'">'+esc(r.ctx[i])+'</span>';
+  return t;
+}
+function srcText(r){ return r.src+(r.oldSet?(" (CS00"+r.cs+" only)"):""); }
+function instCell(r){ if(!r.inst) return ""; return esc(fmtShortTs(r.inst.first))+' <span class="tag cnt" title="'+esc(r.inst.n7045+" x 7045, "+r.inst.n4697+" x 4697; last "+r.inst.last)+'">&times;'+nf(r.inst.count)+'</span>'; }
+var COLS=[
+  {h:"Tags", sk:function(r){return -r.score;}, cell:function(r){return '<td class="first">'+tagHtml(r)+'</td>';}},
+  {h:"Name", sk:function(r){return r.nameL;}, cell:function(r){return '<td class="mono" title="'+esc(r.keyPath||r.name)+'">'+esc(r.name)+'</td>';}},
+  {h:"Display name", sk:function(r){return r.disp.toLowerCase();}, cell:function(r){return '<td title="'+esc(r.disp)+'">'+esc(clip(r.disp,70))+'</td>';}},
+  {h:"Start", sk:function(r){return startRank(r.start);}, cell:function(r){return '<td>'+esc(r.start)+'</td>';}},
+  {h:"Type", sk:function(r){return String(r.type).toLowerCase();}, cell:function(r){return '<td class="muted">'+esc(r.type)+'</td>';}},
+  {h:"Account", sk:function(r){return r.acctDisp.toLowerCase();}, cell:function(r){return '<td class="mono muted lnk" data-user="'+esc(r.acctDisp)+'" title="Run-as account - click to filter. '+esc(r.acctDisp)+'">'+esc(r.acctDisp)+'</td>';}},
+  {h:"Binary", sk:function(r){return r.main.binL;}, cell:function(r){return '<td class="mono" title="'+esc(r.main.raw)+'">'+esc(shortPathN(r.main.bin,3))+(r.main.args?(' <span class="muted">'+esc(clip(r.main.args,60))+'</span>'):"")+'</td>';}},
+  {h:"ServiceDLL", sk:function(r){return r.dllL;}, cell:function(r){return '<td class="mono" title="'+esc(r.dllDisp)+'">'+esc(shortPathN(r.dlls.length?r.dlls[0]:"",2))+(r.dlls.length>1?' <span class="muted">+'+(r.dlls.length-1)+'</span>':'')+'</td>';}},
+  {h:"Key LastWrite (UTC)", sk:function(r){return r.lwMs;}, cell:function(r){return '<td class="mono'+(r.bulk?" muted":"")+'" title="'+esc(r.bulk?CTXWHY.BULK:"Service key LastWrite - the last time anything under the key changed, not necessarily the install time")+'">'+esc(fmtShortTs(r.lw))+'</td>';}},
+  {h:"Installed (first, \u00d7N)", sk:function(r){return r.inst?r.inst.firstMs:0;}, cell:function(r){return '<td class="mono">'+instCell(r)+'</td>';}},
+  {h:"Installed by", sk:function(r){return r.instBy.toLowerCase();}, cell:function(r){return '<td class="mono" title="'+esc(r.instBy)+'">'+esc(clip(r.instBy,40))+'</td>';}},
+  {h:"Source", sk:function(r){return r.src;}, cell:function(r){return '<td class="muted">'+esc(srcText(r))+'</td>';}}
+];
+function sortRows(rows, cols, key, dir){
+  var sk=cols[key].sk;
+  rows.sort(function(a,b){ var x=sk(a),y=sk(b);
+    if(typeof x==="number"&&typeof y==="number") return (x-y)*dir;
+    x=String(x); y=String(y); return x<y?-dir:(x>y?dir:0); });
+}
+function headHtml(cols, key, dir){ var h="<thead><tr>";
+  for(var c=0;c<cols.length;c++){ var arrow=(key===c)?(dir>0?" \u25B2":" \u25BC"):""; h+='<th data-k="'+c+'">'+esc(cols[c].h)+arrow+'</th>'; }
+  return h+"</tr></thead>"; }
+function wireSort(onClick){
+  var ths=$("tbl").getElementsByTagName("th");
+  for(var i=0;i<ths.length;i++){ ths[i].onclick=function(e){
+    e=e||window.event; var t=e.target||e.srcElement;
+    if(t && /\bcgrip\b/.test(t.className+"")) return;   // resize-grip interactions must not sort
+    onClick(parseInt(this.getAttribute("data-k"),10)); }; }
+}
+function setView(v, quiet){
+  VIEW=v;
+  $("vSvc").className=(v==="svc")?"btn on":"btn";
+  $("vTime").className=(v==="time")?"btn on":"btn";
+  $("vAcct").className=(v==="acct")?"btn on":"btn";
+  $("tableTitle").innerHTML=viewTitle();
+  if(!quiet) render();
+}
+function viewTitle(){ return (VIEW==="time")?"Timeline (installs, start-type changes, crashes, key writes)":((VIEW==="acct")?"Accounts (grouped by run-as account)":"Services"); }
+function render(){
+  if(MODE==="generic"){ renderGeneric(); return; }
+  if(!SVCS.length && !TL.length) return;
+  var rows=filteredSvcs();
+  renderAgg(rows);
+  updateChipCounts();
+  if(VIEW==="time"){ renderTime(); return; }
+  if(VIEW==="acct"){ renderAccts(rows); return; }
+  rows=rows.slice(0); sortRows(rows, COLS, SORTKEY, SORTDIR);
+  var shown=rows.length>MAXROWS?MAXROWS:rows.length, html=headHtml(COLS,SORTKEY,SORTDIR)+"<tbody>";
+  for(var i=0;i<shown;i++){ var r=rows[i];
+    html+='<tr data-i="'+i+'"'+(r.sus?' class="sus"':'')+' style="cursor:pointer">';
+    for(var k=0;k<COLS.length;k++) html+=COLS[k].cell(r);
+    html+="</tr>"; }
+  $("tbl").innerHTML=html+"</tbody>";
+  $("count").innerHTML=nf(rows.length)+" services"+(shown<rows.length?(" (showing "+nf(shown)+")"):"")+maxRowsWarn(shown,rows.length);
+  wireSort(function(k){ if(SORTKEY===k) SORTDIR*=-1; else { SORTKEY=k; SORTDIR=1; } render(); });
+  setupColResize(); applyFreeze();
+  window.__viewRows=rows;
+}
+function applyFreeze(){
+  var sc=$("tblScroll"); if(!sc) return;
+  var ths=$("tbl").getElementsByTagName("th"); var y=sc.scrollTop;
+  for(var i=0;i<ths.length;i++){ ths[i].style.top=y+"px"; }
+}
+
+/* ---------- timeline view ---------- */
+function rowSus(x){ return x ? ((x.sus!=null)?x.sus:(x.rec?x.rec.sus:false)) : false; }
+var TCOLS=[
+  {h:"Time (UTC)", sk:function(t){return t.ms;}, cell:function(t){return '<td class="mono first">'+esc(fmtShortTs(t.ts))+'</td>';}},
+  {h:"Kind", sk:function(t){return t.kind;}, cell:function(t){return '<td>'+esc(t.kind)+'</td>';}},
+  {h:"Service", sk:function(t){return String(t.svc).toLowerCase();}, cell:function(t){return '<td class="mono" title="'+esc(t.svc)+'">'+esc(t.svc)+'</td>';}},
+  {h:"Detail", sk:function(t){return String(t.detail).toLowerCase();}, cell:function(t){return '<td class="mono" title="'+esc(clip(t.detail,600))+'">'+esc(clip(t.detail,200))+'</td>';}},
+  {h:"Count", sk:function(t){return t.count;}, cell:function(t){return '<td class="mono" style="text-align:right">'+(t.count>1?('<span class="tag cnt">&times;'+nf(t.count)+'</span>'):"1")+'</td>';}},
+  {h:"Tags", sk:function(t){return t.rec?-t.rec.score:1;}, cell:function(t){return '<td>'+(t.rec?tagHtml(t.rec):"")+'</td>';}}
+];
+function renderTime(){
+  var rows=filteredTl(); sortRows(rows, TCOLS, TSORTKEY, TSORTDIR);
+  var shown=rows.length>MAXROWS?MAXROWS:rows.length, html=headHtml(TCOLS,TSORTKEY,TSORTDIR)+"<tbody>";
+  for(var i=0;i<shown;i++){ var t=rows[i], cls=rowSus(t)?"sus":(t.cluster?"clus":"");
+    html+='<tr data-i="'+i+'"'+(cls?(' class="'+cls+'"'):'')+' style="cursor:pointer">';
+    for(var k=0;k<TCOLS.length;k++) html+=TCOLS[k].cell(t);
+    html+="</tr>"; }
+  $("tbl").innerHTML=html+"</tbody>";
+  $("count").innerHTML=nf(rows.length)+" timeline items"+(shown<rows.length?(" (showing "+nf(shown)+")"):"")+maxRowsWarn(shown,rows.length);
+  wireSort(function(k){ if(TSORTKEY===k) TSORTDIR*=-1; else { TSORTKEY=k; TSORTDIR=1; } render(); });
+  setupColResize(); applyFreeze();
+  window.__viewRows=rows;
+}
+
+/* ---------- accounts view (grouped; click a group to filter Services) ---------- */
+var ACOLS=[
+  {h:"Account", sk:function(g){return g.acct.toLowerCase();}},
+  {h:"Services", sk:function(g){return g.n;}},
+  {h:"Autostart", sk:function(g){return g.auto;}},
+  {h:"Drivers", sk:function(g){return g.drv;}},
+  {h:"Suspicious", sk:function(g){return g.sus;}},
+  {h:"Max score", sk:function(g){return g.maxScore;}},
+  {h:"Newest key write (UTC)", sk:function(g){return g.maxMs;}}
+];
+function buildAcctGroups(rows){
+  var map={}, out=[], i;
+  for(i=0;i<rows.length;i++){ var r=rows[i], g=mget(map,r.acctDisp);
+    if(!g){ g={acct:r.acctDisp, n:0, auto:0, drv:0, sus:0, maxScore:0, maxMs:0, newest:""}; mset(map,r.acctDisp,g); out.push(g); }
+    g.n++; if(isAutostart(r.start)) g.auto++; if(r.tclass==="driver") g.drv++; if(r.sus) g.sus++;
+    if(r.score>g.maxScore) g.maxScore=r.score;
+    if(r.lwMs>g.maxMs){ g.maxMs=r.lwMs; g.newest=r.lw; } }
+  return out;
+}
+function renderAccts(rows){
+  var groups=buildAcctGroups(rows); sortRows(groups, ACOLS, ASORTKEY, ASORTDIR);
+  var html=headHtml(ACOLS,ASORTKEY,ASORTDIR)+"<tbody>";
+  for(var i=0;i<groups.length;i++){ var g=groups[i], a=' data-acct="'+esc(g.acct)+'"';
+    html+='<tr'+(g.sus?' class="sus"':'')+' style="cursor:pointer" title="Click to filter the Services view to this account">';
+    html+='<td class="first mono"'+a+'>'+esc(g.acct)+'</td>';
+    html+='<td class="mono"'+a+' style="text-align:right">'+nf(g.n)+'</td>';
+    html+='<td class="mono"'+a+' style="text-align:right">'+nf(g.auto)+'</td>';
+    html+='<td class="mono"'+a+' style="text-align:right">'+nf(g.drv)+'</td>';
+    html+='<td class="mono"'+a+' style="text-align:right'+(g.sus?';color:#ff6b6b':'')+'">'+nf(g.sus)+'</td>';
+    html+='<td class="mono"'+a+' style="text-align:right">'+g.maxScore+'</td>';
+    html+='<td class="mono"'+a+'>'+esc(fmtShortTs(g.newest))+'</td></tr>'; }
+  $("tbl").innerHTML=html+"</tbody>";
+  $("count").innerHTML=nf(groups.length)+" accounts ("+nf(rows.length)+" services)";
+  wireSort(function(k){ if(ASORTKEY===k) ASORTDIR*=-1; else { ASORTKEY=k; ASORTDIR=1; } render(); });
+  setupColResize(); applyFreeze();
+  window.__viewRows=groups;
+}
+
+/* ---------- settings sidecar (per-view column widths) ---------- */
+var SETTINGS={};
+function settingsPath(){ var d=htaFolder(); return d?(d+"\\Services-Analyzer.settings.json"):""; }
+function loadSettings(){
+  try{ var p=settingsPath();
+    if(p && fileExists(p)){ var o=JSON.parse(readUtf8(p)); if(o && typeof o==="object") SETTINGS=o; }
+  }catch(e){ SETTINGS={}; }
+  if(!SETTINGS) SETTINGS={};
+  if(SETTINGS.colw && typeof SETTINGS.colw==="object") COLW=SETTINGS.colw;
+}
+function saveSettings(){ try{ var p=settingsPath(); if(p) writeUtf8(p, JSON.stringify(SETTINGS)); }catch(e){} }
+
+/* ---------- resizable columns (ported from DFIR-Artifact-Finder v0.2.1) ----------
+   Drag a header's right edge to resize; double-click the edge to reset the view's widths.
+   Widths are stored per view because each view has its own column set; a stored array whose
+   length no longer matches the header count is ignored (auto-reset for that view). */
+var COLW={};
+var DRAG=null;
+function colwKey(){ return (MODE==="generic")?"generic":VIEW; }
+function curZoom(){
+  try{ var el=$("content");
+    var z=parseFloat(el.style.zoom||(el.currentStyle&&el.currentStyle.zoom)||"");
+    if(!z && window.getComputedStyle) z=parseFloat(getComputedStyle(el).zoom);
+    return (z&&z>0)?z:1;
+  }catch(e){ return 1; }
+}
+function setupColResize(){
+  var tbl=$("tbl"); if(!tbl) return;
+  var ths=tbl.getElementsByTagName("th"); if(!ths.length) return;
+  var key=colwKey(), w=COLW[key];
+  if(w && w.length===ths.length){
+    tbl.style.tableLayout="fixed"; tbl.style.width="auto";
+    for(var j=0;j<ths.length;j++) ths[j].style.width=w[j]+"px";
+  } else { tbl.style.tableLayout=""; tbl.style.width=""; }   // the one table is shared by all views - undo a previous view's fixed layout
+  for(var i=0;i<ths.length;i++){
+    var g=document.createElement("div");
+    g.className="cgrip"; g.setAttribute("data-ci",String(i));
+    g.title="Drag to resize column - double-click to reset all widths";
+    g.onmousedown=gripDown; g.ondblclick=gripReset;
+    ths[i].appendChild(g);
+  }
+}
+function gripDown(e){
+  e=e||window.event;
+  var ci=parseInt(this.getAttribute("data-ci"),10);
+  var tbl=$("tbl"), ths=tbl.getElementsByTagName("th");
+  if(isNaN(ci)||ci<0||ci>=ths.length) return false;
+  var key=colwKey(), w=COLW[key];
+  if(!w || w.length!==ths.length){          // first drag: freeze the browser's current widths
+    w=[]; for(var i=0;i<ths.length;i++) w.push(ths[i].offsetWidth);
+    COLW[key]=w;
+    tbl.style.tableLayout="fixed"; tbl.style.width="auto";
+    for(var j=0;j<ths.length;j++) ths[j].style.width=w[j]+"px";
+  }
+  DRAG={key:key, ci:ci, x:(e.clientX||0), w:w[ci], th:ths[ci], z:curZoom()};
+  document.onmousemove=gripMove; document.onmouseup=gripUp;
+  document.onselectstart=function(){ return false; };
+  if(e.preventDefault) e.preventDefault(); e.returnValue=false;
+  if(e.stopPropagation) e.stopPropagation(); e.cancelBubble=true;
+  return false;
+}
+function gripMove(e){
+  e=e||window.event; if(!DRAG) return false;
+  var w=Math.round(DRAG.w+((e.clientX||0)-DRAG.x)/DRAG.z);
+  if(w<40) w=40; if(w>1600) w=1600;
+  COLW[DRAG.key][DRAG.ci]=w; DRAG.th.style.width=w+"px";
+  return false;
+}
+function gripUp(){
+  document.onmousemove=null; document.onmouseup=null; document.onselectstart=null;
+  if(DRAG){ DRAG=null; SETTINGS.colw=COLW; try{ saveSettings(); }catch(e){} }
+}
+function gripReset(e){
+  e=e||window.event;
+  document.onmousemove=null; document.onmouseup=null; document.onselectstart=null; DRAG=null;
+  COLW[colwKey()]=null; SETTINGS.colw=COLW; try{ saveSettings(); }catch(er){}
+  var tbl=$("tbl"); if(tbl){ tbl.style.tableLayout=""; tbl.style.width=""; }
+  render();
+  setStatus("Column widths reset","ok");
+  if(e){ if(e.stopPropagation) e.stopPropagation(); e.cancelBubble=true; }
+  return false;
+}
+
+/* ---------- detail pane ---------- */
+function hlClassFor(entryL){
+  for(var t=0;t<IOCS.length;t++){ if(entryL.indexOf(IOCS[t])>=0) return "hl-ioc"; }
+  if(isUserPath(entryL)) return "hl-user";
+  return "";
+}
+function detRow(label,val,mono){
+  if(val==null||String(val)==="") return "";
+  var vL=String(val).toLowerCase(), cls=hlClassFor(vL);
+  return '<div style="margin:2px 0"><span class="muted" style="display:inline-block;width:150px;vertical-align:top;font-size:11px">'+esc(label)+'</span>'
+    +'<span class="'+(mono?"mono ":"")+(cls||"")+'" style="font-size:12px;word-wrap:break-word">'+esc(val)+'</span></div>';
+}
+function evLine(parts){ return '<div title="'+esc(parts.join(" | "))+'">'+esc(parts.join(" | "))+'</div>'; }
+function renderDetail(r){
+  DETREC=r; DETTL=null;
+  var h='<div class="mono" style="font-size:14px;margin-bottom:6px"><b>'+esc(r.name)+'</b>'+(r.disp?(' <span class="muted">&mdash; '+esc(r.disp)+'</span>'):"")+'</div>', i;
+  h+='<div style="margin-bottom:6px">'+tagHtml(r)+'</div>';
+  if(r.reasons.length){ h+='<div style="font-size:12px;color:#ff9b9b;margin-bottom:6px">';
+    for(i=0;i<r.reasons.length;i++) h+="&bull; "+esc(r.reasons[i])+"<br>"; h+='</div>'; }
+  h+='<h3>Service</h3><div style="word-wrap:break-word">';
+  h+=detRow("Source", r.src==="LOG-ONLY"?"LOG-ONLY - installed per the event log, no matching key in the SYSTEM hive":(r.src==="HIVE+LOG"?"HIVE+LOG - configured, and its install was logged":"HIVE - configured; no install event in the loaded logs"), false);
+  h+=detRow("Key path", r.keyPath, true);
+  h+=detRow("Control set", r.cs?("ControlSet00"+r.cs+(r.oldSet?" (NOT the current set)":(META.csCurrent===r.cs?" (current)":""))):"", true);
+  h+=detRow("Display name", r.disp, false);
+  h+=detRow("Description", r.descr, false);
+  h+=detRow("Start", r.start, true);
+  h+=detRow("Type", r.type, true);
+  h+=detRow("Account (ObjectName)", r.acct, true);
+  h+=detRow("ImagePath", r.image, true);
+  h+=detRow("Binary (resolved)", r.main.bin, true);
+  h+=detRow("Arguments", r.main.args, true);
+  for(i=0;i<r.cmds.length;i++){ if(r.cmds[i].key!==r.main.key) h+=detRow("Other install image", r.cmds[i].raw, true); }
+  h+=detRow("ServiceDLL", r.dllDisp, true);
+  if(r.dlls.length>1 || (r.dll && r.dll!==r.dllDisp)) h+=detRow("ServiceDLL (raw)", r.dll, true);
+  h+=detRow("ServiceMain", r.svcMain, true);
+  h+=detRow("FailureCommand", r.failCmd, true);
+  h+=detRow("Group", r.group, true);
+  h+=detRow("RequiredPrivileges", r.privs, true);
+  h+=detRow("Key LastWrite (UTC)", r.lw?(r.lw+(r.bulk?"  [BULK - part of a mass rewrite, not an install time]":"")):"", true);
+  h+=detRow("Parameters LastWrite", r.plw, true);
+  h+='</div>';
+  if(r.csdiff){ h+='<h3>ControlSet00'+r.csdiff.cs+' holds a different configuration</h3><div>';
+    h+=detRow("ImagePath", r.csdiff.image, true)+detRow("ServiceDLL", r.csdiff.dll, true)+detRow("Start", r.csdiff.start, true)+detRow("Key LastWrite", r.csdiff.lw, true)+'</div>'; }
+  if(r.inst){ h+='<h3>Install history ('+nf(r.inst.count)+': '+r.inst.n7045+' x 7045, '+r.inst.n4697+' x 4697)</h3><div class="dl">';
+    for(i=0;i<r.inst.list.length && i<200;i++){ var it=r.inst.list[i], e=it.ev;
+      h+=evLine([e.ts, (e.id===7045?(it.pair?"7045+4697":"7045"):"4697"), "as \""+e.name+"\"", decodeEnt(e.image), "start "+(normStart(e.start)||"?"), "account "+(e.acct||"?"),
+        "by "+it.who.label+(it.who.sid && it.who.sid!==it.who.label?(" ("+it.who.sid+")"):""), (it.how?("matched on "+it.how):"")]); }
+    h+='</div>'; }
+  if(r.chg){ h+='<h3>Start-type changes (7040): '+nf(r.chg.length)+'</h3><div class="dl">';
+    for(i=r.chg.length-1;i>=0 && i>=r.chg.length-200;i--) h+=evLine([r.chg[i].ts, r.chg[i].from+" -> "+r.chg[i].to, "by "+(r.chg[i].sid||"?")]);
+    h+='</div>'; }
+  if(r.fails){ h+='<h3>Crashes / start failures: '+nf(r.fails.length)+'</h3><div class="dl">';
+    for(i=0;i<r.fails.length && i<200;i++) h+=evLine([r.fails[i].ts, String(r.fails[i].id), r.fails[i].text]);
+    h+='</div>'; }
+  $("detBody").innerHTML=h;
+  showEl("detailCard",true);
+}
+function renderTlDetail(t){
+  DETREC=null; DETTL=t;
+  var h='<div class="mono" style="font-size:14px;margin-bottom:6px"><b>'+esc(t.kind)+'</b> &mdash; '+esc(t.svc)+'</div>', i;
+  h+=detRow("Time (UTC)", t.ts, true)+detRow("Detail", t.detail, true)+detRow("Count", String(t.count), true);
+  if(t.cluster){ h+='<h3>Service keys in this bulk rewrite</h3><div class="dl">';
+    for(i=0;i<t.cluster.recs.length && i<1000;i++){ var r=t.cluster.recs[i]; h+=evLine([r.lw, r.name, r.start, r.main.bin||"(no image)"]); }
+    h+='</div>'; }
+  else if(t.evs){ h+='<h3>Events</h3><div class="dl">';
+    for(i=0;i<t.evs.length && i<500;i++) h+=evLine([t.evs[i].ts, String(t.evs[i].id), t.evs[i].text||""]);
+    h+='</div><div class="muted" style="font-size:11px">Not linked to a service record (the event names a display string that is not in the hive, or a service no longer present).</div>'; }
+  $("detBody").innerHTML=h;
+  showEl("detailCard",true);
+}
+function closeDetail(){ DETREC=null; DETTL=null; showEl("detailCard",false); $("detBody").innerHTML=""; }
+function recNotes(r){
+  var out=[];
+  out.push(r.name+(r.disp?(" ("+r.disp+")"):"")+"  ["+srcText(r)+"]");
+  out.push("tags: "+(r.tags.length?r.tags.join(", "):"none")+"  score "+r.score+(r.ctx.length?("  context: "+r.ctx.join(", ")):""));
+  for(var q=0;q<r.reasons.length;q++) out.push("  - "+r.reasons[q]);
+  out.push("start "+(r.start||"?")+" | type "+(r.type||"?")+" | account "+r.acctDisp);
+  if(r.image) out.push("image: "+r.image);
+  if(r.dllDisp) out.push("ServiceDLL: "+r.dllDisp);
+  if(r.failCmd) out.push("FailureCommand: "+r.failCmd);
+  if(r.lw) out.push("key LastWrite "+r.lw+" UTC"+(r.bulk?" (bulk rewrite)":""));
+  if(r.inst) out.push("installs: "+r.inst.count+" (first "+r.inst.first+", last "+r.inst.last+") by "+r.instBy);
+  return out;
+}
+function copyDetail(){
+  var out=[];
+  if(DETREC) out=recNotes(DETREC);
+  else if(DETTL) out=[DETTL.ts+" | "+DETTL.kind+" | "+DETTL.svc+" | "+DETTL.detail+(DETTL.count>1?(" | x"+DETTL.count):"")];
+  else { setStatus("No record open","err"); return; }
+  try{ window.clipboardData.setData("Text", out.join("\r\n")); setStatus("Record copied to clipboard","ok"); }
+  catch(e){ setStatus("Copy failed: "+e.message,"err"); }
+}
+
+/* ---------- generic grid (any other CSV) ---------- */
+function isNumStr(s){ s=trimStr(String(s)); return s!=="" && /^-?\d+(\.\d+)?$/.test(s); }
+function ingestGeneric(raw, head, srcLabel){
+  setMode("generic");
+  GHEAD=head; GROWS=[];
+  for(var i=1;i<raw.length;i++){ var rw=raw[i]; if(rw.length>=1 && !(rw.length===1 && rw[0]==="")) GROWS.push(rw); }
+  GSRC=srcLabel;
+  GSRCIDX=-1; for(var c=0;c<head.length;c++){ if(/^SourceFile(name)?$/i.test(trimStr(head[c]))){ GSRCIDX=c; break; } }
+  if(GSRCIDX>=0){ var sv=[]; for(var s=0;s<GROWS.length;s++) sv.push(GSRCIDX<GROWS[s].length?GROWS[s][GSRCIDX]:""); populateSourceFilter(distinctVals(sv)); }
+  else populateSourceFilter([]);
+  $("results").className="";
+  $("srcpill").innerHTML=nf(GROWS.length)+" rows &middot; "+esc(srcLabel)+" ("+GHEAD.length+" cols)";
+  QUERY=""; $("q").value=""; GSORTKEY=-1;
+  closeDetail();
+  setStatus("Loaded "+nf(GROWS.length)+" rows (generic table view)","ok");
+  renderGeneric();
+}
+function renderGeneric(){
+  if(!GHEAD) return;
+  var q=QUERY, rows=[];
+  for(var i=0;i<GROWS.length;i++){ var rw=GROWS[i];
+    if(SRCFILTER && GSRCIDX>=0 && (GSRCIDX<rw.length?rw[GSRCIDX]:"")!==SRCFILTER) continue;
+    if(q){ if(rw.join("  ").toLowerCase().indexOf(q)<0) continue; }
+    rows.push(rw);
+  }
+  if(GSORTKEY>=0){ var k=GSORTKEY, dir=GSORTDIR; rows=rows.slice(0);
+    rows.sort(function(a,b){ var x=(k<a.length?a[k]:""), y=(k<b.length?b[k]:"");
+      if(isNumStr(x)&&isNumStr(y)) return (parseFloat(x)-parseFloat(y))*dir;
+      x=String(x).toLowerCase(); y=String(y).toLowerCase(); return x<y?-dir:(x>y?dir:0); });
+  }
+  $("statbar").innerHTML=stat(nf(GROWS.length),"rows")+stat(nf(GHEAD.length),"columns")+stat(nf(rows.length),"matching")+
+    '<span class="stat" style="min-width:240px"><span class="n" style="font-size:12px">'+esc(GSRC)+'</span><span class="l">source</span></span>';
+  var shown=rows.length>MAXROWS?MAXROWS:rows.length;
+  var h="<thead><tr>";
+  for(var c=0;c<GHEAD.length;c++){ var ar=(GSORTKEY===c)?(GSORTDIR>0?" \u25B2":" \u25BC"):""; h+='<th data-k="'+c+'">'+esc(GHEAD[c])+ar+'</th>'; }
+  h+="</tr></thead><tbody>";
+  for(var r=0;r<shown;r++){ var row=rows[r]; h+="<tr>";
+    for(var c2=0;c2<GHEAD.length;c2++){ var v=(c2<row.length?row[c2]:""); h+='<td class="mono" title="'+esc(v)+'">'+esc(v)+'</td>'; }
+    h+="</tr>"; }
+  h+="</tbody>"; $("tbl").innerHTML=h;
+  $("count").innerHTML=nf(rows.length)+" rows"+(shown<rows.length?(" (showing "+nf(shown)+")"):"")+maxRowsWarn(shown,rows.length);
+  wireSort(function(kk){ if(GSORTKEY===kk) GSORTDIR*=-1; else { GSORTKEY=kk; GSORTDIR=1; } renderGeneric(); });
+  setupColResize();
+  applyFreeze();
+  window.__viewRows=rows;
+}
+function setMode(m){
+  MODE=m; var sv=(m==="svc");
+  showEl("pfCards",sv); showEl("pfCats",sv); showEl("pfFilt",sv); showEl("pfDateCtl",sv); showEl("pfFoot",sv);
+  showEl("iocBtn",sv); showEl("viewToggle",sv);
+  if(!sv){ showEl("iocWrap",false); closeDetail(); showEl("userWrap",false); }   // generic mode uses the source dropdown, not the account filter
+  if(sv) showEl("srcWrap",false);
+  $("ovTitle").innerHTML = sv ? "Overview &mdash; reflects active filters" : "Overview";
+  $("tableTitle").innerHTML = sv ? viewTitle() : "Records";
+}
+
+/* ---------- export / copy ---------- */
+function cq(v){ v=(v==null)?"":String(v); return /[",\r\n]/.test(v)?('"'+v.replace(/"/g,'""')+'"'):v; }
+function nowStamp(){ var d=new Date(); function p(x){return (x<10?"0":"")+x;}
+  return d.getFullYear()+""+p(d.getMonth()+1)+p(d.getDate())+"_"+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds()); }
+function writeExport(prefix, lines, n, what){
+  var dir=LASTOUTDIR||trimStr($("outDir").value)||LOADED_CSV_DIR;
+  if(!dir){ setStatus("No output folder to write to - set an output directory, process sources, or load a CSV first.","err"); return; }
+  var path=dir+"\\"+prefix+nowStamp()+".csv";
+  try{ writeUtf8(path, lines.join("\r\n")); setStatus("Exported "+nf(n)+" "+what+" \u2192 "+path,"ok"); appendLog("Exported: "+path); }
+  catch(e){ setStatus("Export failed: "+e.message,"err"); }
+}
+function exportView(){
+  if(MODE==="generic"){ exportGeneric(); return; }
+  var rows=window.__viewRows||[], lines, i;
+  if(!rows.length){ setStatus("Nothing to export","err"); return; }
+  if(VIEW==="time"){
+    lines=["Time_UTC,Kind,Service,Detail,Count,Score,Tags"];
+    for(i=0;i<rows.length;i++){ var t=rows[i];
+      lines.push([cq(t.ts),cq(t.kind),cq(t.svc),cq(t.detail),cq(t.count),cq(t.rec?t.rec.score:""),cq(t.rec?t.rec.tags.join("; "):"")].join(",")); }
+    writeExport("services_timeline_export_", lines, rows.length, "timeline items"); return;
+  }
+  if(VIEW==="acct"){
+    lines=["Account,Services,Autostart,Drivers,Suspicious,MaxScore,NewestKeyWrite_UTC"];
+    for(i=0;i<rows.length;i++){ var g=rows[i]; lines.push([cq(g.acct),cq(g.n),cq(g.auto),cq(g.drv),cq(g.sus),cq(g.maxScore),cq(g.newest)].join(",")); }
+    writeExport("services_accounts_export_", lines, rows.length, "accounts"); return;
+  }
+  lines=["Name,DisplayName,Description,StartMode,ServiceType,Account,ImagePath,Binary,ServiceDLL,FailureCommand,ServiceMain,Group,RequiredPrivileges,KeyLastWrite_UTC,ParametersKeyLastWrite_UTC,ControlSet,Source,InstallCount,FirstInstall_UTC,LastInstall_UTC,InstalledBy,StartTypeChanges,Tags,Context,Score,Suspicious,Reasons"];
+  for(i=0;i<rows.length;i++){ var r=rows[i];
+    lines.push([cq(r.name),cq(r.disp),cq(r.descr),cq(r.start),cq(r.type),cq(r.acctDisp),cq(r.image),cq(r.main.bin),cq(r.dllDisp),cq(r.failCmd),cq(r.svcMain),cq(r.group),cq(r.privs),
+      cq(r.lw),cq(r.plw),cq(r.cs?("ControlSet00"+r.cs):""),cq(r.src),cq(r.inst?r.inst.count:0),cq(r.inst?r.inst.first:""),cq(r.inst?r.inst.last:""),cq(r.instBy),
+      cq(r.chg?r.chg.length:0),cq(r.tags.join("; ")),cq(r.ctx.join("; ")),cq(r.score),cq(r.sus?"Yes":"No"),cq(r.reasons.join("; "))].join(",")); }
+  writeExport("services_export_", lines, rows.length, "services");
+}
+function exportGeneric(){
+  var rows=window.__viewRows||[];
+  if(!GHEAD||!rows.length){ setStatus("Nothing to export","err"); return; }
+  var lines=[], hd=[]; for(var c=0;c<GHEAD.length;c++) hd.push(cq(GHEAD[c])); lines.push(hd.join(","));
+  for(var i=0;i<rows.length;i++){ var rw=rows[i], cells=[]; for(var c2=0;c2<GHEAD.length;c2++) cells.push(cq(c2<rw.length?rw[c2]:"")); lines.push(cells.join(",")); }
+  writeExport("filtered_export_", lines, rows.length, "rows");
+}
+function copyNotes(){
+  var rows=(window.__viewRows||[]).slice(0,500), out=[], i;
+  if(!rows.length){ setStatus("Nothing to copy","err"); return; }
+  if(MODE==="generic"){ out.push(GHEAD.join("\t")); for(i=0;i<rows.length;i++) out.push(rows[i].join("\t")); }
+  else if(VIEW==="time"){ for(i=0;i<rows.length;i++){ var t=rows[i];
+    out.push(t.ts+" | "+t.kind+" | "+t.svc+" | "+clip(t.detail,240)+(t.count>1?(" | x"+t.count):"")+(t.rec&&t.rec.tags.length?(" | "+t.rec.tags.join(",")+" (score "+t.rec.score+")"):"")); } }
+  else if(VIEW==="acct"){ for(i=0;i<rows.length;i++){ var g=rows[i];
+    out.push(g.acct+" | services="+g.n+" | autostart="+g.auto+" | drivers="+g.drv+" | sus="+g.sus+" | max score "+g.maxScore+" | newest "+g.newest); } }
+  else { for(i=0;i<rows.length;i++){ var r=rows[i];
+    out.push(r.name+" | "+(r.start||"?")+" | "+r.acctDisp+" | "+clip(r.image,200)+" | "+srcText(r)
+      +(r.inst?(" | installed "+r.inst.first+" x"+r.inst.count+" by "+r.instBy):"")
+      +(r.tags.length?(" | "+r.tags.join(",")+" (score "+r.score+")"):"")+(r.reasons.length?(" | "+r.reasons.join("; ")):"")); } }
+  try{ window.clipboardData.setData("Text", out.join("\r\n")); setStatus("Copied "+rows.length+" rows to clipboard"+copyCapNote(window.__viewRows),"ok"); }
+  catch(e){ setStatus("Copy failed: "+e.message,"err"); }
+}
+
+/* ---------- IOC list ---------- */
+function applyIocs(){
+  var t=$("iocBox").value, parts=String(t).split(/[\r\n,;]+/), out=[];
+  for(var i=0;i<parts.length;i++){ var s=trimStr(parts[i]).toLowerCase(); if(s) out.push(s); }
+  IOCS=out;
+  $("iocInfo").innerHTML=IOCS.length?(nf(IOCS.length)+" term(s) active"):"no terms";
+  if(MODE==="svc"&&SVCS.length){ rescoreAll(); render(); if(DETREC) renderDetail(DETREC); }
+  setStatus(IOCS.length?("IOC list applied - "+IOCS.length+" term(s), services rescored"):"IOC list cleared","ok");
+}
+
+/* ---------- wiring ---------- */
+function init(){
+  try{ window.resizeTo(1360,920); }catch(e){}
+  $("apppill").innerHTML="app v"+APP_VERSION; $("apppill").title="This app v"+APP_VERSION+" - checking GitHub for a newer release\u2026";
+  try{ document.title="Services Analyzer v"+APP_VERSION; }catch(e){}
+  $("tblScroll").onscroll=applyFreeze;
+  loadSettings();
+  $("hostName").onkeyup=function(){ HOST_TOUCHED=true; HOST_LOCK=false; syncOutDir(); if(SVCS.length) hostCheck(); };
+  $("outDir").onkeyup=function(){ OUT_TOUCHED=true; };
+  loadToolkitIoc();   // shared toolkit IOC.txt - merged before any CLI /auto run
+
+  var zoom=0.9;
+  var zContent=$("content");
+  /* A+ / A- text scaling. <header> and the modal cards live OUTSIDE #content, so each block is zoomed and
+     then widened by 1/zoom (a zoom<1 shrinks a 100%-wide block and leaves a blank right gutter). For the
+     modals the CARD is scaled, not the fixed overlay, so the dim backdrop still covers the viewport. */
+  function zoomBlock(el){ if(!el) return; el.style.zoom=zoom; el.style.width=(100/zoom)+"%"; el.style.boxSizing="border-box"; }
+  var ZOOM_MODALS=["helpModal"];
+  function applyZoom(){
+    zoomBlock(zContent);
+    var hs=document.getElementsByTagName("header"); if(hs.length) zoomBlock(hs[0]);
+    for(var mi=0;mi<ZOOM_MODALS.length;mi++){ var m=$(ZOOM_MODALS[mi]); if(!m) continue;
+      var cards=m.getElementsByTagName("div");
+      for(var ci=0;ci<cards.length;ci++){ if(/(^|\s)mcard(\s|$)/.test(cards[ci].className+"")){ cards[ci].style.zoom=zoom; break; } } }
+    var p=Math.round(zoom*100)+"%";
+    $("fup").title="Larger text ("+p+")"; $("fdown").title="Smaller text ("+p+")"; }
+  applyZoom();
+  try{ window.onresize=function(){ try{ zContent.style.width=(100/zoom)+"%";
+    var hr=document.getElementsByTagName("header"); if(hr.length) hr[0].style.width=(100/zoom)+"%"; }catch(er){} }; }catch(eR){}
+  $("fup").onclick=function(){ zoom=Math.min(zoom+0.15,2.5); applyZoom(); };
+  $("fdown").onclick=function(){ zoom=Math.max(zoom-0.15,0.6); applyZoom(); };
+
+  $("verBtn").onclick=function(){ checkVersion(false); checkEvxVersion(false);
+    setStatus("RECmd "+(LOCAL_VER?("v"+LOCAL_VER):"not found")+" \u00b7 EvtxECmd "+(EVX_VER?("v"+EVX_VER):"not found"), (LOCAL_VER&&EVX_VER)?"ok":"err"); };
+  $("updBtn").onclick=function(){ askDownload("rec"); };
+  $("updEvBtn").onclick=function(){ askDownload("evx"); };
+  $("openDirBtn").onclick=openDir;
+  $("procBtn").onclick=function(){ processRun(); };
+  $("loadSelBtn").onclick=function(){ var v=$("producedSel").value; if(!v) return;
+    setStatus("Loading "+v,"muted"); window.setTimeout(function(){ loadAnyCsv(v); },50); };
+  $("locateBtn").onclick=function(){ var v=trimStr($("inPath").value); if(!v){ setStatus("Set an input first","err"); return; } hostGuessFrom(v); locateSources(v,null); };
+  $("inPath").onchange=function(){ var v=trimStr(this.value); if(v){ hostGuessFrom(v); locateSources(v,null); } };
+  $("browseBtn").onclick=function(){
+    try{
+      var sha=new ActiveXObject("Shell.Application");
+      var fld=sha.BrowseForFolder(0,"Select a collection / host folder (searched recursively for config\\SYSTEM and winevt\\Logs\\System.evtx / Security.evtx).",0x51);
+      if(fld){ var p=""; try{ p=fld.Self.Path+""; }catch(e2){}
+        if(/^[a-z]:\\|^\\\\/i.test(p)){ $("inPath").value=p; hostGuessFrom(p); locateSources(p,null); }
+        else if(p) setStatus("That selection has no filesystem path - pick a real folder.","err"); }
+    }catch(e){ $("inPick").click(); }
+  };
+  $("browseFileBtn").onclick=function(){ $("inPick").click(); };
+  $("inPick").onchange=function(){ if(this.value){ var v=this.value; $("inPath").value=v; hostGuessFrom(v); locateSources(v,null); } };
+  var pb=document.getElementsByTagName("button");
+  for(var bi=0;bi<pb.length;bi++){ if(pb[bi].getAttribute("data-pick")){ pb[bi].onclick=function(){ PICKTARGET=this.getAttribute("data-pick"); $("srcPick").click(); }; } }
+  $("srcPick").onchange=function(){ if(this.value && PICKTARGET){ var v=this.value; $(PICKTARGET).value=v;
+    if(PICKTARGET==="hivePath" && !trimStr($("sysPath").value) && !trimStr($("secPath").value)) pairLogs(v,[],[],"");
+    hostGuessFrom(v); srcSummary(); } };
+  $("hiveSel").onchange=function(){ var v=this.value; if(!v) return; setSrc("hivePath",v); pairLogs(v,LOG_CANDS.sys,LOG_CANDS.sec,LOG_CANDS.root); hostGuessFrom(v); srcSummary(); };
+  $("loadBtn").onclick=function(){ $("csvPick").click(); };
+  $("csvPick").onchange=function(){ if(this.value){ setStatus("Loading "+this.value,"muted"); loadAnyCsv(this.value); } };
+  $("logToggle").onclick=function(){ var l=$("log");
+    if(l.style.display==="none"||!l.style.display){
+      if(!trimStr(l.innerHTML.replace(/<[^>]*>/g,""))){ l.innerHTML='<span class="muted">(empty - RECmd / EvtxECmd output appears here after a run finishes. While a run is in progress a console window shows live progress.)</span>'; l.setAttribute("data-ph","1"); }
+      l.style.display="block"; this.innerHTML="Hide log";
+    } else { l.style.display="none"; this.innerHTML="Show log"; } };
+
+  for(var s=0;s<CHIPSETS.length;s++){ var bs=$(CHIPSETS[s].box).getElementsByTagName("button");
+    for(var j=0;j<bs.length;j++){ if(bs[j].getAttribute(CHIPSETS[s].attr)){ bs[j].setAttribute("data-key",CHIPSETS[s].key); bs[j].setAttribute("data-attr",CHIPSETS[s].attr);
+      bs[j].onclick=function(){ var key=this.getAttribute("data-key"), v=this.getAttribute(this.getAttribute("data-attr"));
+        if(key==="cat") CURCAT=v; else if(key==="tf") TYPEF=v; else if(key==="sf") STARTF=v; else SRCF=v;
+        highlightChips(); render(); }; } } }
+
+  $("q").onkeyup=function(){ if(qTimer) window.clearTimeout(qTimer);
+    qTimer=window.setTimeout(function(){ QUERY=trimStr($("q").value).toLowerCase(); render(); },150); };
+  $("dfrom").onchange=function(){ DFROM=dayNum(this.value); render(); };
+  $("dto").onchange=function(){ DTO=dayNum(this.value); render(); };
+  $("srcSel").onchange=function(){ SRCFILTER=this.value; render(); };
+  $("userSel").onchange=function(){ USERFILTER=this.value; render(); };
+  $("clearBtn").onclick=function(){ $("q").value=""; $("dfrom").value=""; $("dto").value=""; $("srcSel").value="";
+    QUERY=""; DFROM=0; DTO=0; SRCFILTER=""; CURCAT="all"; TYPEF="all"; STARTF="all"; SRCF="all"; USERFILTER=""; try{ $("userSel").value=""; }catch(ec){}
+    highlightChips(); render(); };
+  $("exportBtn").onclick=exportView;
+  $("copyBtn").onclick=copyNotes;
+  $("vSvc").onclick=function(){ setView("svc"); };
+  $("vTime").onclick=function(){ setView("time"); };
+  $("vAcct").onclick=function(){ setView("acct"); };
+  $("iocBtn").onclick=function(){ var w=$("iocWrap"); showEl("iocWrap", /\bhide\b/.test(w.className)); };
+  $("iocApply").onclick=applyIocs;
+  $("iocLoad").onclick=function(){ $("iocPick").click(); };
+  $("iocPick").onchange=function(){ if(this.value){
+    try{ $("iocBox").value=readUtf8(this.value); applyIocs(); }
+    catch(e){ setStatus("Could not read IOC file: "+e.message,"err"); } } };
+  $("detClose").onclick=closeDetail;
+  $("detCopy").onclick=copyDetail;
+
+  /* click delegation: data-user (account cell) -> filter; data-acct (Accounts view) -> filter + Services view;
+     data-q -> search; a services / timeline row -> detail pane */
+  document.onclick=function(e){ e=e||window.event; var t=e.target||e.srcElement;
+    if(t && /\bcgrip\b/.test((t.className||"")+"")) return;   // column-resize grips never act as row/link clicks
+    var du=t&&t.getAttribute?t.getAttribute("data-user"):null;
+    if(du!=null&&du!==""){ USERFILTER=du; try{ $("userSel").value=du; }catch(eu){} render(); return; }
+    var da=t&&t.getAttribute?t.getAttribute("data-acct"):null;
+    if(da!=null&&da!==""){ USERFILTER=da; try{ $("userSel").value=da; }catch(ea){} setView("svc"); return; }
+    var q=t&&t.getAttribute?t.getAttribute("data-q"):null;
+    if(q){ $("q").value=q; QUERY=q.toLowerCase(); render(); return; }
+    if(MODE!=="svc" || VIEW==="acct") return;
+    var n=t;
+    while(n && n.tagName!=="TR"){ n=n.parentNode; if(n&&n.tagName==="TABLE"){ n=null; break; } }
+    if(n && n.getAttribute && n.getAttribute("data-i")!=null && n.getAttribute("data-i")!==""){
+      var ix=parseInt(n.getAttribute("data-i"),10), rows=window.__viewRows||[];
+      if(ix>=0&&ix<rows.length){
+        var it=rows[ix];
+        if(VIEW==="time"){ if(it.rec) renderDetail(it.rec); else renderTlDetail(it); } else renderDetail(it);
+        var trs=$("tbl").getElementsByTagName("tr");
+        for(var z=0;z<trs.length;z++){ if(trs[z].getAttribute("data-i")!=null){
+          var zi=parseInt(trs[z].getAttribute("data-i"),10), zr=rows[zi]||null, base=rowSus(zr)?"sus":((zr&&zr.cluster)?"clus":"");
+          trs[z].className = (zi===ix) ? ((base?base+" ":"")+"sel") : base; } }
+      }
+    }
+  };
+
+  var __cli=parseCli(); var __had=false; try{ __had=applyCli(__cli); }catch(eC){ appendLog("CLI parse error: "+eC.message); bootLog("CLI error: "+eC.message); }
+  bootLog("CLI: input="+(__cli.input||"(none)")+" outDir="+(__cli.outDir||"(none)")+" auto="+__cli.auto);
+  evaluateTooling(!__had);
+  if(isNetworkPath(htaFolder()))
+    appendLog("Heads-up: this app is running from a network location ("+htaFolder()+"). Windows zone policy may block the UTF-8 file reader there; the app falls back to ANSI IO automatically, but for full fidelity copy the folder to a local path (e.g. C:\\Tools\\Services-Analyzer).");
+  bootLog("init done");
+}
+function isNetworkPath(p){
+  try{ if(/^\\\\/.test(p)) return true;
+    var fso=new ActiveXObject("Scripting.FileSystemObject");
+    return fso.GetDrive(fso.GetDriveName(p)).DriveType===3;   // 3 = Remote
+  }catch(e){ return false; }
+}
+function dayNum(s){ if(!s) return 0; var m=String(s).match(/(\d{4})-(\d{1,2})-(\d{1,2})/); if(!m) return 0;
+  function p(x){ x=String(x); return x.length<2?("0"+x):x; }
+  return Number(m[1]+p(m[2])+p(m[3])); }
+
+/* ---------- help / about overlay ---------- */
+var GITHUB="https://github.com/bpmorris22/Services-Analyzer";
+function openUrl(u){ try{ new ActiveXObject("WScript.Shell").Run('"'+u+'"',1,false); }catch(e){ setStatus("Could not open browser: "+e.message,"err"); } }
+function openHelp(){ try{ $("helpVer").innerHTML="v"+APP_VERSION; }catch(e){} showEl("helpModal",true); }
+function closeHelp(){ showEl("helpModal",false); }
+
+var MANUAL_URL="https://raw.githubusercontent.com/bpmorris22/Services-Analyzer/main/docs/Services-Analyzer-Manual.html";   // this app's own manual (the toolkit field guide does not cover it yet)
+var MANUAL_FILE="Services-Analyzer-Manual.html";
+function openManualFile(path){ try{ new ActiveXObject("WScript.Shell").Run('explorer.exe "'+path+'"',1,false); return true; } catch(e){ setStatus("Downloaded the field guide, but could not open it: "+e.message,"err"); return false; } }
+function openInstructions(){
+  var fso=new ActiveXObject("Scripting.FileSystemObject"); var dest=fso.GetSpecialFolder(2)+"\\"+MANUAL_FILE;
+  setStatus("Downloading the Services Analyzer manual from GitHub\u2026","muted");
+  var ps1=fso.GetSpecialFolder(2)+"\\man_"+uid()+".ps1"; var dq=String(dest).replace(/'/g,"''"); var L=[];
+  L.push("$ErrorActionPreference='Stop'"); L.push("[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12");
+  L.push("Invoke-WebRequest -UseBasicParsing -Uri '"+MANUAL_URL+"' -OutFile '"+dq+"' -Headers @{ 'User-Agent'='Services-Analyzer' }");
+  L.push("if((Get-Item '"+dq+"').Length -lt 2000){ throw 'downloaded file too small' }"); L.push("Write-Output 'MAN_OK'");
+  try{ var f=fso.CreateTextFile(ps1,true); f.Write(L.join("\r\n")); f.Close(); } catch(ew){ setStatus("Could not stage the field-guide download: "+ew.message,"err"); return; }
+  var r=runBat(['powershell -NoProfile -ExecutionPolicy Bypass -File "'+ps1+'" > "__LOG__" 2>&1']); try{ fso.DeleteFile(ps1); }catch(e0){}
+  if((r.log+"").indexOf("MAN_OK")>=0 && fileExists(dest)){ if(openManualFile(dest)) setStatus("Field guide downloaded and opened in your browser.","ok"); appendLog("Field guide: downloaded latest -> "+dest); }
+  else { appendLog("--- field-guide download ---\n"+r.log);
+    if(fileExists(dest)){ if(openManualFile(dest)) setStatus("Download failed (offline?) - opened the previously downloaded copy.","muted"); }
+    else setStatus("Field-guide download failed (offline, or the file moved). See log; or open it from the GitHub repo.","err"); }
+}
+
+/* ---------- command-line invocation: "<input>" ["<outDir>"] [/auto] [/from:yyyy-MM-dd] [/to:yyyy-MM-dd] ----------
+   .csv -> reload (the whole run when it is one of this app's); a folder holding this app's runinfo.json -> reload
+   its newest run; a collection / host folder, SYSTEM hive or .evtx -> locate the sources (+ process with /auto). */
+/* HTA:APPLICATION.commandLine is UNDEFINED in IE=edge document mode (a known mshta quirk that silently
+   kills CLI args). Recover it from WMI: the newest mshta.exe process whose command line names this .hta. */
+function getCommandLine(){
+  try{ var cl=saHta.commandLine+""; if(cl && cl!=="undefined") return cl; }catch(e){}
+  try{
+    var lp=decodeURIComponent(location.pathname+"").replace(/^\//,"").replace(/\//g,"\\");
+    var fn=lp.substring(lp.lastIndexOf("\\")+1).toLowerCase(); if(!fn) return "";
+    var loc=new ActiveXObject("WbemScripting.SWbemLocator"), svc=loc.ConnectServer(".","root\\cimv2");
+    var q=svc.ExecQuery("SELECT CommandLine,CreationDate FROM Win32_Process WHERE Name='mshta.exe'");
+    var best="", bestDate="", en=new Enumerator(q);
+    for(; !en.atEnd(); en.moveNext()){ var pr=en.item(); var pcl=(pr.CommandLine==null?"":pr.CommandLine+"");
+      if(pcl.toLowerCase().indexOf(fn)<0) continue; var cd=(pr.CreationDate==null?"":pr.CreationDate+"");
+      if(!best || cd>bestDate){ best=pcl; bestDate=cd; } }
+    return best;
+  }catch(e2){}
+  return "";
+}
+function tokenizeCmdTail(){ var cl=getCommandLine(); if(!cl) return [];
+  var m=cl.match(/\.hta"?/i); var tail=m?cl.substring(m.index+m[0].length):cl;
+  var toks=[],i=0,n=tail.length,cur="",inq=false;
+  while(i<n){ var c=tail.charAt(i);
+    if(inq){ if(c==='"'){inq=false;} else cur+=c; i++; continue; }
+    if(c==='"'){ inq=true; i++; continue; }
+    if(c===' '||c==='\t'){ if(cur!==""){toks.push(cur);cur="";} i++; continue; }
+    cur+=c; i++; }
+  if(cur!=="") toks.push(cur); return toks; }
+/* ---------- case window (family, 2026-07-07) ----------
+   /from:/to: (UTC calendar dates) prefill this app's activity-date filter before any /auto run, and are
+   recorded in runinfo.json. FILTER ONLY - the window never touches scoring (attackers stage outside the
+   known window; the operator can always widen the filter inside the tool). */
+var CASE_FROM="", CASE_TO="";
+function applyCaseWindow(from,to){
+  if(from){ if(/^\d{4}-\d{2}-\d{2}$/.test(from)){ CASE_FROM=from; try{ $("dfrom").value=from; DFROM=dayNum(from); }catch(e){} } else appendLog("CLI: ignoring invalid /from value '"+from+"'"); }
+  if(to){ if(/^\d{4}-\d{2}-\d{2}$/.test(to)){ CASE_TO=to; try{ $("dto").value=to; DTO=dayNum(to); }catch(e2){} } else appendLog("CLI: ignoring invalid /to value '"+to+"'"); }
+  if(CASE_FROM||CASE_TO) appendLog("CLI: case window "+(CASE_FROM||"\u2026")+" .. "+(CASE_TO||"\u2026")+" - prefilled the date filter (filter only, never scored)");
+}
+function parseCli(){ var toks=tokenizeCmdTail(), cli={input:"",outDir:"",auto:false,from:"",to:""};
+  for(var i=0;i<toks.length;i++){ var t=toks[i];
+    if(/^[\/\-]{1,2}auto$/i.test(t)){ cli.auto=true; continue; }
+    var fm=t.match(/^[\/\-]{1,2}from[:=](\d{4}-\d{2}-\d{2})$/i); if(fm){ cli.from=fm[1]; continue; }
+    var tm=t.match(/^[\/\-]{1,2}to[:=](\d{4}-\d{2}-\d{2})$/i); if(tm){ cli.to=tm[1]; continue; }
+    if(/^[\/\-]/.test(t)) continue;
+    if(!cli.input) cli.input=t; else if(!cli.outDir) cli.outDir=t; }
+  return cli; }
+function applyCli(cli){ if(!cli.input) return false;
+  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  applyCaseWindow(cli.from, cli.to);   // case window (UTC): prefill the date filter BEFORE any /auto run - filter only, never scored
+  if(/\.csv$/i.test(cli.input) && fso.FileExists(cli.input)){ appendLog("CLI: loading "+cli.input); window.setTimeout(function(){ loadAnyCsv(cli.input); },60); return true; }
+  if(fso.FolderExists(cli.input)){ var rs=runSetForFolder(cli.input);
+    if(rs){ appendLog("CLI: reloading the newest run in "+cli.input); window.setTimeout(function(){ populateProduced(runSetList(rs)); loadRunSet(rs, baseName(cli.input)); },60); return true; } }
+  if(!fso.FolderExists(cli.input) && !fso.FileExists(cli.input) && !isLongPath(cli.input)){ setStatus("CLI input not found: "+cli.input,"err"); appendLog("CLI input not found: "+cli.input); return false; }
+  $("inPath").value=cli.input;
+  if(cli.outDir){ $("outDir").value=cli.outDir; OUT_TOUCHED=true; hostGuessFrom(cli.outDir); if(guessHost(cli.outDir)) HOST_LOCK=true; }
+  else hostGuessFrom(cli.input);
+  locateSources(cli.input, function(ok){
+    if(!ok){ setStatus("CLI: no SYSTEM hive or System / Security.evtx found under "+cli.input,"err"); appendLog("CLI: nothing to process under "+cli.input); return; }
+    if(cli.auto){ appendLog("CLI: /auto - processing "+cli.input); window.setTimeout(function(){ autoProcess(); },200); }
+    else setStatus("CLI: sources located - review them, then click 'Process \u2192 analyze'.","muted");
+  });
+  return true; }
+
+/* ---------- self-update: quiet check of this app's GitHub Releases; one-click download of a newer .hta ---------- */
+var SELF_REPO="bpmorris22/Services-Analyzer", SELF_HTA="Services-Analyzer.hta", SELF_LATEST="", SELF_ASSET_URL="";
+function selfVerNewer(r,l){ var a=String(r).split("."),b=String(l).split("."),n=Math.max(a.length,b.length);
+  for(var i=0;i<n;i++){ var x=parseInt(a[i],10)||0,y=parseInt(b[i],10)||0; if(x!==y) return x>y; } return false; }
+function selfPath(){ try{ var p=decodeURIComponent(location.pathname+"").replace(/^\//,"").replace(/\//g,"\\");
+  if(/\.hta$/i.test(p) && fileExists(p)) return p; }catch(e){} return (htaFolder()||"")+"\\"+SELF_HTA; }
+function checkSelfUpdate(){
+  try{
+    var x=new ActiveXObject("MSXML2.XMLHTTP.6.0");
+    x.open("GET","https://api.github.com/repos/"+SELF_REPO+"/releases/latest",true);
+    try{ x.setRequestHeader("User-Agent",SELF_HTA); }catch(eh){}
+    x.onreadystatechange=function(){ if(x.readyState!==4) return;
+      try{ if(x.status!==200) return; var t=x.responseText+"";
+        var m=t.match(/"tag_name"\s*:\s*"v?([0-9.]+)"/i); if(!m) return;
+        var latest=m[1]; var ap=$("apppill"); if(!selfVerNewer(latest,APP_VERSION)){ if(ap){ ap.className="pill ok"; ap.title="Up to date - v"+APP_VERSION+" is the latest release."; } return; }
+        var url="", re=/"browser_download_url"\s*:\s*"([^"]+\.hta)"/ig, mm;
+        while((mm=re.exec(t))){ if(mm[1].toLowerCase().indexOf(SELF_HTA.toLowerCase())>=0){ url=mm[1]; break; } if(!url) url=mm[1]; }
+        if(!url) url="https://github.com/"+SELF_REPO+"/releases/download/v"+latest+"/"+SELF_HTA;
+        SELF_LATEST=latest; SELF_ASSET_URL=url;
+        if(ap){ ap.className="pill bad"; ap.innerHTML="app v"+APP_VERSION+" &middot; update v"+latest; ap.title="A newer version (v"+latest+") is on GitHub - click the Update button."; }
+        var b=$("selfUpd"); if(b){ b.innerHTML="Update to v"+latest; b.className="btn primary";
+          b.title="A newer "+SELF_HTA+" (v"+latest+") is on GitHub - click to download & replace this file"; }
+      }catch(e){} };
+    x.send();
+  }catch(e){}
+}
+function doSelfUpdate(){
+  if(!SELF_ASSET_URL){ setStatus("No update available (or offline).","muted"); return; }
+  var target=selfPath();
+  if(!target || !/\.hta$/i.test(target)){ setStatus("Can't locate this app's own file to update in place.","err"); return; }
+  if(!confirm("Download "+SELF_HTA+" v"+SELF_LATEST+" and replace this file?\n\n"+target+"\n\nAfter it downloads, close and reopen the app to run the new version.")) return;
+  setStatus("Downloading v"+SELF_LATEST+"\u2026","muted");
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), tmp=fso.GetSpecialFolder(2)+"";
+  var ps1=tmp+"\\selfupd_"+new Date().getTime()+Math.floor(Math.random()*100000)+".ps1";
+  var tq=String(target).replace(/'/g,"''"), uq=String(SELF_ASSET_URL).replace(/'/g,"''");
+  var L=["$ErrorActionPreference='Stop'","[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12",
+    "$u='"+uq+"'","$t='"+tq+"'","$tmp=Join-Path $env:TEMP ('selfupd_'+[guid]::NewGuid().ToString('N')+'.hta')",
+    "Invoke-WebRequest -Uri $u -OutFile $tmp -Headers @{ 'User-Agent'='"+SELF_HTA+"' }",
+    "if((Get-Item $tmp).Length -lt 2000){ throw 'downloaded file too small' }",
+    "Copy-Item $tmp $t -Force","Remove-Item $tmp -Force -ErrorAction SilentlyContinue","Write-Output 'SELFUPD_OK'"];
+  try{ var f=fso.CreateTextFile(ps1,true); f.Write(L.join("\r\n")); f.Close(); }catch(ew){ setStatus("Self-update stage failed: "+ew.message,"err"); return; }
+  try{ var r=runBat(['powershell -NoProfile -ExecutionPolicy Bypass -File "'+ps1+'" > "__LOG__" 2>&1']);
+    try{ fso.DeleteFile(ps1); }catch(e0){}
+    if((r.log+"").indexOf("SELFUPD_OK")>=0){ var b=$("selfUpd"); if(b) b.className="btn primary hide";
+      setStatus("Updated to v"+SELF_LATEST+" - CLOSE and reopen the app to run the new version.","ok");
+      try{ alert("Update installed (v"+SELF_LATEST+").\n\nClose and reopen "+SELF_HTA+" to run the new version."); }catch(e){}
+    } else { appendLog("--- self-update ---\n"+r.log); setStatus("Self-update failed - see log; download manually from GitHub if needed.","err"); }
+  }catch(e){ setStatus("Self-update failed: "+e.message,"err"); }
+}
+window.onload=function(){ init(); try{ window.setTimeout(checkSelfUpdate,600); }catch(e){} };
+</script>
+<div id="helpModal" class="modal hide" onclick="if((event.srcElement||{}).id==='helpModal')closeHelp()">
+  <div class="mcard">
+    <span class="x" onclick="closeHelp()" title="Close">&times;</span>
+    <h2>Services Analyzer <span class="muted" style="font-size:13px;font-weight:400" id="helpVer"></span></h2>
+    <div class="gh muted">GitHub: <span class="lnk" onclick="openUrl(GITHUB)">https://github.com/bpmorris22/Services-Analyzer</span></div>
+    <p>A single-file GUI for <b>Windows services triage</b>. It reads every service and driver the <b>SYSTEM hive</b> configures (Eric Zimmerman's RECmd, Services plugin) and <b>joins</b> it to the install history in the <b>System</b> and <b>Security</b> event logs (EvtxECmd: 7045 / 4697 installs, 7040 start-type changes, crashes and start failures), then scores every service for persistence and remote-execution tradecraft.</p>
+    <h3>Quick start</h3>
+    <ul>
+      <li>Point the input at a collection or host folder (KAPE / Velociraptor trees work as-is), a <code>SYSTEM</code> hive, or a <code>System.evtx</code> / <code>Security.evtx</code>. The app finds <code>config\SYSTEM</code> and <code>winevt\Logs\</code> and fills the three source boxes &mdash; check them, then <b>Process &rarr; analyze</b>. A typical host takes under a minute (Security.evtx is the slow one).</li>
+      <li>Engines: a <code>RECmd</code> folder (exe + <code>Plugins\</code>, which must hold <code>RegistryPlugin.Services.dll</code>) and an <code>EvtxECmd</code> folder (exe + <code>Maps\</code>) next to this <code>.hta</code>, or <code>C:\ZimmermanTools</code>. The update buttons fetch the whole folders.</li>
+      <li><b>Load existing run / CSV&hellip;</b> &mdash; any CSV this app produced reloads the whole run (through <code>runinfo.json</code>); other CSVs open in a plain table.</li>
+    </ul>
+    <h3>What each source adds</h3>
+    <ul>
+      <li><b>SYSTEM hive</b> &mdash; what is configured: name, display name, start mode, type, binary, ServiceDLL, run-as account, FailureCommand, ServiceMain, key LastWrite. Required for the hive rules.</li>
+      <li><b>System.evtx</b> &mdash; when services were installed (7045, with the installer's SID), start-type changes (7040), crashes (7031 / 7034), start failures (7000 / 7009 / 7023 / 7024 / 7030).</li>
+      <li><b>Security.evtx</b> &mdash; 4697 installs, which name the installing account (only where "Security System Extension" auditing is on).</li>
+      <li><b>The join</b> &mdash; an install with no matching hive key becomes a <b>LOG-ONLY</b> record: a transient or deleted service (PsExec, smbexec, <code>sc create</code> one-shots) that a hive-only or log-only tool cannot see. Hive-only runs lose LOG-ONLY and USER-INSTALL; events-only runs lose every hive rule and do not score LOG-ONLY (everything is log-only there).</li>
+    </ul>
+    <h3>Command line</h3>
+    <p><code>mshta "Services-Analyzer.hta" "&lt;input&gt;" ["&lt;outDir&gt;"] [/auto] [/from:yyyy-MM-dd] [/to:yyyy-MM-dd]</code></p>
+    <ul>
+      <li><code>&lt;input&gt;</code> &mdash; a collection / host folder, a SYSTEM hive or an .evtx (sources located; processed with <code>/auto</code>), a <code>.csv</code> (reloads its run), or an output folder holding this app's <code>runinfo.json</code> (reloads its newest run).</li>
+      <li><code>&lt;outDir&gt;</code> &mdash; output directory (optional). &nbsp; <code>/auto</code> &mdash; process immediately.</li>
+      <li><code>/from:yyyy-MM-dd</code> <code>/to:yyyy-MM-dd</code> &mdash; case window (UTC, inclusive): prefills the activity-date filter and is recorded in runinfo; never affects scoring.</li>
+      <li><b>Target hostname</b> is required before processing &mdash; it names the output folder <code>_Processed\&lt;host&gt;\Services-Analyzer</code> next to this app (family convention shared with the Artifact-Finder). It is guessed from <code>Collection-&lt;host&gt;-&hellip;</code> paths or a passed <code>_Processed\&lt;host&gt;\</code> outDir, and cross-checked against the hive's own ComputerName after a run (amber warning on a mismatch &mdash; never blocking).</li>
+      <li><b>Shared IOC list</b>: an <code>IOC.txt</code> next to this app (one term per line, <code>#</code> comments) is auto-merged into the IOC box at launch.</li>
+      <li>After every successful run a <code>runinfo.json</code> provenance entry (app, host, input, files, sources, hive ComputerName) is appended in the output folder, including a <b>triage summary</b> (services, flagged count, max score, top hits) &mdash; the Artifact-Finder shows these per host.</li>
+    </ul>
+    <h3>Scoring (score &ge; 3 = suspicious)</h3>
+    <ul>
+      <li><b>+3</b> IOC hit &middot; USERPATH (binary or ServiceDLL in a user-writable folder &mdash; the binary only, never its arguments) &middot; LOLBIN (binary is cmd / powershell / mshta / wscript / cscript / regsvr32 / rundll32 / msiexec / certutil / bitsadmin / java / node / python; svchost and the Windows Installer service are exempt) &middot; REMOTE-EXEC (loopback / <code>%COMPUTERNAME%</code> / admin-share UNC, <code>cmd /Q /c</code>, <code>echo &gt; &hellip; &amp; &hellip; &amp; del</code>, encoded PowerShell).</li>
+      <li><b>+2</b> TOOLNAME (PSEXESVC, PAExec, RemCom, csexec, winexesvc, BTOBTO &mdash; dual-use, a review flag) &middot; SVCDLL (ServiceDLL outside system32 / Program Files / DriverStore) &middot; DRVPATH (driver outside system32\drivers / DriverStore &mdash; BYOVD staging) &middot; DEFENSE-OFF (Defender / firewall / Security Center / EventLog / Sysmon disabled &mdash; legitimate for Defender beside third-party AV) &middot; USER-INSTALL (installed by a user account, not SYSTEM or a machine account).</li>
+      <li><b>+1</b> FAILCMD (recovery program set; its binary is checked too) &middot; ACCOUNT (runs as a real account) &middot; RANDNAME (random-looking name &mdash; low recall, a hint) &middot; OLDSET (only in a non-current control set) &middot; LOG-ONLY &middot; NO7045 (Win32 service key written inside the System log's coverage with no install event &mdash; direct registry write, or a cleared log) &middot; NOSVC (7000 / 7009 within 60 s of install) &middot; RECENT (lone key write within 30 days of the hive's newest service-key write) &middot; AUTOSTART (autostart + a suspicious binary).</li>
+      <li>Context tags (no points): <b>BULK</b> &mdash; key LastWrite inside a mass rewrite (&ge; 10 service keys within &plusmn;2 s: Windows servicing). <b>Key LastWrite is not install time</b>; BULK keys never count as recent and show as one row in the Timeline. <b>CSDIFF</b> &mdash; the other control set differs (detail pane).</li>
+    </ul>
+    <h3>Notes</h3>
+    <ul>
+      <li>Three views: <b>Services</b> (one row per service, score-ranked; type / start / source chips), <b>Timeline</b> (installs, start-type changes collapsed per service per day, crashes, lone key writes and one row per bulk rewrite), <b>Accounts</b> (grouped by run-as account &mdash; click to filter). The <code>account:</code> dropdown and Account cells filter every view.</li>
+      <li>7045 logs the service's <b>display name</b> when one was supplied; the join tries key name, display name, the key name in the display name's parentheses, a unique image path and the paired 4697. Display names stored as resource strings (<code>@%SystemRoot%\&hellip;,-2</code>) cannot be resolved offline.</li>
+      <li>4697 needs auditing; without it the installer is the 7045 SID (domain SIDs are named when a 4697 for the same SID exists).</li>
+      <li>Binaries are not hashed (they are rarely collected) &mdash; pivot to AmcacheParser-Wrapper / MFTECmd-Wrapper for SHA1 and file timestamps; for stitched lateral-movement sessions use Login Activity Triage.</li>
+      <li>Columns are resizable &mdash; drag a header's right edge; double-click the edge to reset. All timestamps are UTC.</li>
+    </ul>
+    <p class="muted" style="font-size:11px">MIT &copy; 2026 Ben Morris &mdash; click the link above for the full README &amp; releases.</p>
+  </div>
+</div>
+
+</body>
+</html>
