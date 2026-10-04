@@ -303,7 +303,7 @@ function bootLog(msg){
 window.onerror=function(msg,url,line){ bootLog("ONERROR line "+line+": "+msg); return false; };
 bootLog("script top-level reached");
 
-var APP_VERSION = "0.2.1";
+var APP_VERSION = "0.2.2";
 var APP_NAME = "Services-Analyzer";      // output folder _Processed\<host>\Services-Analyzer (no -Wrapper suffix to strip)
 var KNOWN_LATEST_RECMD = "2026.5.0";     // EZ site CalVer, verified 2026-07-11 (exe --version still banners SemVer 2.0.0.0)
 var RECMD_ZIP_URL = "https://download.ericzimmermanstools.com/RECmd.zip";       // official EZ mirror (net4; family default - folder-shaped tool)
@@ -461,6 +461,7 @@ function zoneNote(){
   appendLog("NOTE: this app is running from a network location, so Windows zone policy blocks the UTF-8 file reader (ADODB.Stream). Falling back to ANSI file IO - everything works, but non-ASCII characters may display incorrectly. For full fidelity copy this folder to a LOCAL path (e.g. C:\\Tools\\Services-Analyzer) and run it from there.");
 }
 function readUtf8(path){
+  if(isLongPath(path)) return readUtf8Long(path);   // ADODB cannot open a 260+ char path in any form - see "long-path file IO"
   if(FILE_IO==="adodb"){
     try{
       // ReadText(-1) on a large file is quadratic in MSHTML (30s for 16MB); read in 64KB chunks (~0.1s).
@@ -480,6 +481,7 @@ function readUtf8(path){
   return out;
 }
 function writeUtf8(path,text){
+  if(isLongPath(path)){ writeUtf8Long(path,text); return; }
   if(FILE_IO==="adodb"){
     try{
       var st=new ActiveXObject("ADODB.Stream");
@@ -494,16 +496,18 @@ function writeUtf8(path,text){
   var f=fso.CreateTextFile(path,true,false); f.Write(text); f.Close();
 }
 /* plain ASCII write (no BOM) - the .reb batch goes to RECmd's YAML reader, which must not see a UTF-8 BOM */
-function writeAscii(path,text){ var fso=new ActiveXObject("Scripting.FileSystemObject"); var f=fso.CreateTextFile(path,true,false); f.Write(text); f.Close(); }
-/* FSO CreateFolder is single-level - walk up and create every missing parent */
+function writeAscii(path,text){ var fso=new ActiveXObject("Scripting.FileSystemObject"); var f=fso.CreateTextFile(lpIO(path),true,false); f.Write(text); f.Close(); }
+/* FSO CreateFolder is single-level - walk up and create every missing parent. Checked and created through \\?\
+   (lpAny) at any length: a deep output folder can pass MAX_PATH, and a plain CreateFolder already fails past ~248. */
 function ensureDir(p){
   var fso=new ActiveXObject("Scripting.FileSystemObject");
   p=String(p).replace(/[\\\/]+$/,"");
-  if(!p || fso.FolderExists(p)) return true;
+  function has(q){ try{ return fso.FolderExists(q) || (!!lpAny(q) && fso.FolderExists(lpAny(q))); }catch(e0){ return false; } }
+  if(!p || has(p)) return true;
   var par=parentDir(p);
-  if(par && par!==p && !fso.FolderExists(par)) ensureDir(par);
-  try{ fso.CreateFolder(p); }catch(e){}
-  return fso.FolderExists(p);
+  if(par && par!==p && !has(par)) ensureDir(par);
+  try{ fso.CreateFolder(lpAny(p)||p); }catch(e){ try{ fso.CreateFolder(p); }catch(e2){} }
+  return has(p);
 }
 function uid(){ return new Date().getTime()+""+Math.floor(Math.random()*100000); }
 /* cmd expands %N / %VAR% inside .bat lines even within quotes - Velociraptor trees contain literal % (C%3A) */
@@ -882,7 +886,7 @@ function writeRunInfo(outdir, input, freshFiles, extra){
   try{
     var p=String(outdir).replace(/[\\\/]+$/,"")+"\\runinfo.json";
     var arr=[];
-    try{ if(fileExists(p)){ var old=JSON.parse(readUtf8(p)); if(old && old.length!=null) arr=old; } }catch(e0){}
+    try{ if(fileSeen(p)){ var old=JSON.parse(readUtf8(p)); if(old && old.length!=null) arr=old; } }catch(e0){}   // long-path aware (deep output folder)
     var d=new Date(); function p2(x){ return (x<10?"0":"")+x; }
     var iso=d.getUTCFullYear()+"-"+p2(d.getUTCMonth()+1)+"-"+p2(d.getUTCDate())+"T"+p2(d.getUTCHours())+":"+p2(d.getUTCMinutes())+":"+p2(d.getUTCSeconds())+"Z";
     var names=[]; for(var i=0;i<freshFiles.length && i<50;i++) names.push(freshFiles[i].name||String(freshFiles[i]));
@@ -977,6 +981,55 @@ function inputSeen(p, wantDir, what){
     : "this app cannot verify it; the engine reads it and reports it if it is really missing: "+p));
   return true; }
 function fileSeen(p){ return fileExists(p) || (isLongPath(p) && lpKind(p)==="f"); }   // verified only - for sibling guesses, never trusted blind
+function dirSeen(p){ return folderExists(p) || (isLongPath(p) && lpKind(p)==="d"); }
+/* ---------- long-path file IO (v0.2.2) ----------
+   The \\?\ re-check above covered SOURCE paths only. A run whose output folder is deep enough that its CSV paths pass
+   259 characters reloaded only the CSVs under the limit (VERIFIED 2026-10-04: a 259 / 261 / 264 / 268-char run came
+   back as "Events-only" - the System CSV alone). Ground truth inside mshta (probe HTAs, 2026-10-04, Win11 26200,
+   LongPathsEnabled=1):
+   - ADODB.Stream LoadFromFile / SaveToFile fail on a 260+ char path in BOTH forms (3002 / 3004) - and on ANY \\?\
+     path, even a short one;
+   - FSO cannot copy or move through \\?\ (CopyFile / MoveFile / File.Copy raise 5), its Unicode text mode is no
+     byte-exact reader (units next to a NUL came back zeroed) and always writes an FF FE BOM;
+   - a plain FSO folder walk silently SKIPS every child whose full path is 260+ (no error);
+   - FSO through \\?\ does exist / walk / size / create folder / ANSI read + write - with a normalised path only
+     (a doubled "\" or a "\.\" segment fails);
+   - cmd's copy reads and writes \\?\ paths byte-exact, non-ASCII names included when started through
+     WScript.Shell.Run (an ANSI .bat cannot carry those names).
+   So a long file is READ by copying it to a short %TEMP% name and reading that copy with the normal UTF-8 reader,
+   WRITTEN by writing the short temp file and copying it into place, and folders are WALKED through \\?\ (paths come
+   back through unLp). Should the copy itself fail, a read falls back to FSO ANSI through \\?\ with a note - the
+   family's zone fallback: the all-ASCII CSV structure survives, non-ASCII characters may display incorrectly. */
+function unLp(p){ p=String(p||"").replace(/^\\\\\?\\UNC\\/i,"\\\\").replace(/^\\\\\?\\/,"");   // back to the plain path (engine args, runinfo, display)
+  return /^[a-z]:/.test(p) ? p.charAt(0).toUpperCase()+p.substring(1) : p; }   // FSO lowercases the drive letter of a \\?\ path
+function lpAny(p){ var q="";   // the \\?\ form of an absolute path at ANY length, normalised first ("" for a relative path)
+  try{ q=lpForm(new ActiveXObject("Scripting.FileSystemObject").GetAbsolutePathName(String(p||""))); }catch(e){}
+  return q; }
+function lpIO(p){ p=String(p||""); return isLongPath(p) ? (lpAny(p)||p) : p; }   // the path FSO needs: \\?\ form past MAX_PATH, else unchanged
+/* the folder object to walk - through \\?\ whenever the path allows, because a plain walk drops long children */
+function lpFolder(dir){ var fso=new ActiveXObject("Scripting.FileSystemObject"), q=lpAny(dir);
+  try{ if(q && fso.FolderExists(q)) return fso.GetFolder(q); }catch(e){}
+  try{ if(fso.FolderExists(dir)) return fso.GetFolder(dir); }catch(e2){}
+  return null; }
+function lpTemp(){ return new ActiveXObject("Scripting.FileSystemObject").GetSpecialFolder(2)+"\\svcan_lp_"+uid()+".tmp"; }
+/* byte-exact copy that reaches 260+ char paths. Started directly (Unicode command line), not from a .bat */
+function lpCopy(src, dst){ var rc=-1;
+  try{ rc=new ActiveXObject("WScript.Shell").Run('cmd /d /v:off /c copy /y /b "'+lpIO(src)+'" "'+lpIO(dst)+'"', 0, true); }catch(e){}
+  return rc===0 && fileSeen(dst); }
+function readUtf8Long(path){
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), tmp=lpTemp(), copied=false;
+  try{ copied=lpCopy(path, tmp); if(copied) return readUtf8(tmp); }
+  finally{ try{ if(fso.FileExists(tmp)) fso.DeleteFile(tmp); }catch(e){} }
+  var f=fso.OpenTextFile(lpIO(path),1,false,0), out=f.AtEndOfStream?"":f.ReadAll(); f.Close();   // a real miss throws here, as before
+  appendLog("Note: could not copy this "+String(path).length+"-character file to %TEMP% for UTF-8 reading - read it as ANSI instead (non-ASCII characters may display incorrectly): "+path);
+  if(out.length>=3 && out.charCodeAt(0)===239 && out.charCodeAt(1)===187 && out.charCodeAt(2)===191) out=out.substring(3);
+  return out; }
+function writeUtf8Long(path, text){
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), tmp=lpTemp();
+  try{ writeUtf8(tmp, text);
+    if(!lpCopy(tmp, path)) throw new Error("could not write "+path+" ("+String(path).length+" characters - over MAX_PATH; the copy into place failed)"); }
+  finally{ try{ if(fso.FileExists(tmp)) fso.DeleteFile(tmp); }catch(e){} }
+}
 function inListCI(p, list){ var l=String(p).toLowerCase(); list=list||[]; for(var i=0;i<list.length;i++){ if(String(list[i]).toLowerCase()===l) return true; } return false; }
 function srcSeen(p, list){ return inListCI(p, list) || fileSeen(p); }
 function srcOk(p, what){
@@ -1187,27 +1240,27 @@ function finishRun(R, log, recOnly){
 }
 function csvNameSet(dir){ var o={}, l=listCsvFiles(dir); for(var i=0;i<l.length;i++) o["#"+l[i].name]=true; return o; }
 function listCsvFiles(dir){
-  var fso=new ActiveXObject("Scripting.FileSystemObject"), out=[];
-  if(!fso.FolderExists(dir)) return out;
-  var e=new Enumerator(fso.GetFolder(dir).Files);
-  for(; !e.atEnd(); e.moveNext()){ var f=e.item(); if(/\.csv$/i.test(f.Name+"")) out.push({name:f.Name+"", path:f.Path+"", size:f.Size}); }
+  var fo=lpFolder(dir), out=[];   // through \\?\ - a plain walk would silently drop this run's 260+ char CSVs
+  if(!fo) return out;
+  var e=new Enumerator(fo.Files);
+  for(; !e.atEnd(); e.moveNext()){ var f=e.item(); if(/\.csv$/i.test(f.Name+"")) out.push({name:f.Name+"", path:unLp(f.Path+""), size:f.Size}); }
   out.sort(function(a,b){ return a.name<b.name?1:(a.name>b.name?-1:0); });   // newest timestamp-prefix first
   return out;
 }
 /* RECmd writes the plugin detail CSV into a <stamp>\ subfolder named after the batch CSV's own stamp;
    PluginDetailFile in the batch CSV is the absolute path at run time (stale once a run is moved). */
 function detailFor(batchPath, batchObj){
-  var fso=new ActiveXObject("Scripting.FileSystemObject"), m=baseName(batchPath).match(/^(\d{14})_/), i;
-  if(m){ var d=parentDir(batchPath)+"\\"+m[1];
-    if(fso.FolderExists(d)){ var best="", e=new Enumerator(fso.GetFolder(d).Files);
-      for(; !e.atEnd(); e.moveNext()){ var n=e.item().Name+""; if(/_Services__.*\.csv$/i.test(n) && (!best || n>baseName(best))) best=e.item().Path+""; }
+  var m=baseName(batchPath).match(/^(\d{14})_/), i;
+  if(m){ var fo=lpFolder(parentDir(batchPath)+"\\"+m[1]);   // walked through \\?\ (long children)
+    if(fo){ var best="", e=new Enumerator(fo.Files);
+      for(; !e.atEnd(); e.moveNext()){ var n=e.item().Name+""; if(/_Services__.*\.csv$/i.test(n) && (!best || n>baseName(best))) best=unLp(e.item().Path+""); }
       if(best) return best; } }
   try{
     var c=batchObj||readCsvObj(batchPath), ip=c.idx.hasOwnProperty("PluginDetailFile")?c.idx.PluginDetailFile:-1;
     if(ip<0) return "";
     for(i=1;i<c.raw.length;i++){ var p=trimStr(cell(c.raw[i],ip)); if(!p) continue;
-      if(fileExists(p)) return p;
-      var alt=parentDir(batchPath)+"\\"+baseName(parentDir(p))+"\\"+baseName(p); if(fileExists(alt)) return alt;
+      if(fileSeen(p)) return p;
+      var alt=parentDir(batchPath)+"\\"+baseName(parentDir(p))+"\\"+baseName(p); if(fileSeen(alt)) return alt;
       break; }
   }catch(e2){}
   return "";
@@ -1215,7 +1268,7 @@ function detailFor(batchPath, batchObj){
 function fmtSize(n){ if(!n) return "0 B"; var u=["B","KB","MB","GB"], i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return n.toFixed(i?1:0)+" "+u[i]; }
 function runSetList(set){
   var out=[], fso=new ActiveXObject("Scripting.FileSystemObject"), k, keys=["batch","detail","sys","sec"];
-  for(var i=0;i<keys.length;i++){ k=keys[i]; if(!set[k]) continue; var sz=0; try{ sz=fso.GetFile(set[k]).Size; }catch(e){}
+  for(var i=0;i<keys.length;i++){ k=keys[i]; if(!set[k]) continue; var sz=0; try{ sz=fso.GetFile(lpIO(set[k])).Size; }catch(e){}
     out.push({name:baseName(set[k]), path:set[k], size:sz}); }
   return out;
 }
@@ -1270,11 +1323,13 @@ function readCsvObj(path){ var raw=parseCSV(readUtf8(path)), idx={};
 function gi(c,n){ return (c && c.idx.hasOwnProperty(n)) ? c.idx[n] : -1; }
 
 /* ---------- reload: any CSV of a run brings back the whole run (runinfo.json files[]) ---------- */
-function readRunInfo(dir){ var p=String(dir).replace(/[\\\/]+$/,"")+"\\runinfo.json"; if(!fileExists(p)) return [];
+/* every check / read here is long-path aware (fileSeen, readUtf8): a deep output folder puts these CSVs past MAX_PATH */
+function readRunInfo(dir){ var p=String(dir).replace(/[\\\/]+$/,"")+"\\runinfo.json"; if(!fileSeen(p)) return [];
   try{ var a=JSON.parse(readUtf8(p)); return (a&&a.length!=null)?a:[]; }catch(e){ return []; } }
 function setFromEntry(dir, ent){
+  dir=String(dir).replace(/[\\\/]+$/,"");   // a doubled "\" would defeat the \\?\ form
   var set={dir:dir, batch:"", detail:"", sys:"", sec:""}, f=ent.files||[], i;
-  for(i=0;i<f.length;i++){ var rel=String(f[i]), p=dir+"\\"+rel; if(!fileExists(p)) continue;
+  for(i=0;i<f.length;i++){ var rel=String(f[i]), p=dir+"\\"+rel; if(!fileSeen(p)) continue;
     if(/_RECmd_Batch_.*_Output\.csv$/i.test(rel)) set.batch=p;
     else if(/_Services__.*\.csv$/i.test(rel)) set.detail=p;
     else if(/_ServicesAnalyzer_SystemLog\.csv$/i.test(rel)) set.sys=p;
@@ -2638,12 +2693,14 @@ function parseCli(){ var toks=tokenizeCmdTail(), cli={input:"",outDir:"",auto:fa
     if(!cli.input) cli.input=t; else if(!cli.outDir) cli.outDir=t; }
   return cli; }
 function applyCli(cli){ if(!cli.input) return false;
-  var fso=new ActiveXObject("Scripting.FileSystemObject");
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), isCsv=/\.csv$/i.test(cli.input);
   applyCaseWindow(cli.from, cli.to);   // case window (UTC): prefill the date filter BEFORE any /auto run - filter only, never scored
-  if(/\.csv$/i.test(cli.input) && fso.FileExists(cli.input)){ appendLog("CLI: loading "+cli.input); window.setTimeout(function(){ loadAnyCsv(cli.input); },60); return true; }
-  if(fso.FolderExists(cli.input)){ var rs=runSetForFolder(cli.input);
+  // reload a run: a CSV of it or its output folder - either may be past MAX_PATH (seen through \\?\)
+  if(isCsv && fileSeen(cli.input)){ appendLog("CLI: loading "+cli.input); window.setTimeout(function(){ loadAnyCsv(cli.input); },60); return true; }
+  if(dirSeen(cli.input)){ var rs=runSetForFolder(cli.input);
     if(rs){ appendLog("CLI: reloading the newest run in "+cli.input); window.setTimeout(function(){ populateProduced(runSetList(rs)); loadRunSet(rs, baseName(cli.input)); },60); return true; } }
-  if(!fso.FolderExists(cli.input) && !fso.FileExists(cli.input) && !isLongPath(cli.input)){ setStatus("CLI input not found: "+cli.input,"err"); appendLog("CLI input not found: "+cli.input); return false; }
+  // a long source path nothing can see is left to the engine (family rule); a CSV has no engine to report the miss
+  if(!fso.FolderExists(cli.input) && !fso.FileExists(cli.input) && (!isLongPath(cli.input) || (isCsv && !lpKind(cli.input)))){ setStatus("CLI input not found: "+cli.input,"err"); appendLog("CLI input not found: "+cli.input); return false; }
   $("inPath").value=cli.input;
   if(cli.outDir){ $("outDir").value=cli.outDir; OUT_TOUCHED=true; hostGuessFrom(cli.outDir); if(guessHost(cli.outDir)) HOST_LOCK=true; }
   else hostGuessFrom(cli.input);
