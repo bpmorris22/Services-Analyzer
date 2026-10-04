@@ -73,7 +73,7 @@
       <span class="pill">Author: Ben Morris</span>
       <span class="pill">github.com/bpmorris22/Services-Analyzer</span>
       <span class="pill">MIT licence</span>
-      <span class="pill">App v0.1.2</span>
+      <span class="pill">App v0.2.0</span>
       <span class="pill">Manual updated 2026-10-03</span>
       <span class="pill">All screenshots use synthetic data (host WKS-0142, domain CONTOSO)</span>
     </div>
@@ -268,7 +268,7 @@
   <tr><td>"Security.evtx: no 4697 events (auditing off?)"</td><td>Security System Extension auditing wasn't enabled — 7045 still carries the installs.</td></tr>
   <tr><td>Hive-only run when you expected logs</td><td>EvtxECmd wasn't found — the status says so; use <b>Update / download EvtxECmd</b>.</td></tr>
   <tr><td>"Access denied" / no CSV for a live <code>C:\Windows\System32\config\SYSTEM</code></td><td>Live hives are exclusively locked — collect first (Velociraptor / KAPE), then process the copy.</td></tr>
-  <tr><td>A very long evidence path shows a "Note: … over MAX_PATH" log line</td><td>Expected: mshta can't check paths over 260 characters, so it lets the engine read them (the engines handle long paths).</td></tr>
+  <tr><td>A very long evidence path shows a "Note: … over MAX_PATH" log line</td><td>Expected. mshta's plain file checks miss paths of 260+ characters, so the app re-checks them through the <code>\\?\</code> extended-length form ("verified"). If even that can't see a path you entered, the app passes it to the engine, which reports a genuine miss (the engines handle long paths). A guessed log or hive is used only when it can be seen.</td></tr>
   <tr><td>Running from a network share, accented names look wrong</td><td>Zone policy blocks the UTF-8 reader there; the app falls back to ANSI file IO. Copy the toolkit to a local folder for full fidelity.</td></tr>
   <tr><td>Amber chip next to the hostname</td><td>The hive's ComputerName (or the logs' Computer) differs from the Target hostname — check you picked the right host before filing the output.</td></tr>
 </table></div>

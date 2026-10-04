@@ -303,7 +303,7 @@ function bootLog(msg){
 window.onerror=function(msg,url,line){ bootLog("ONERROR line "+line+": "+msg); return false; };
 bootLog("script top-level reached");
 
-var APP_VERSION = "0.1.2";
+var APP_VERSION = "0.2.0";
 var APP_NAME = "Services-Analyzer";      // output folder _Processed\<host>\Services-Analyzer (no -Wrapper suffix to strip)
 var KNOWN_LATEST_RECMD = "2026.5.0";     // EZ site CalVer, verified 2026-07-11 (exe --version still banners SemVer 2.0.0.0)
 var RECMD_ZIP_URL = "https://download.ericzimmermanstools.com/RECmd.zip";       // official EZ mirror (net4; family default - folder-shaped tool)
@@ -949,18 +949,38 @@ function pickNearest(anchor, list, root){
     if(l>bl){ bl=l; best=list[i]; } }
   return best;
 }
-/* mshta is not long-path aware: FSO reports a path longer than MAX_PATH (260) as missing even when it exists,
-   and Velociraptor trees routinely exceed MAX_PATH (VERIFIED 2026-10-03: a staged 261-char Security.evtx path
-   read as missing while the 259-char System.evtx beside it was fine). The .NET engines handle long paths, so
-   for a source FSO cannot see we trust the folder enumeration (or the operator) and let the engine report a
-   genuine miss. */
+/* ---------- long paths (MAX_PATH, family 2026-10-03) ----------
+   mshta is not long-path aware: plain FSO FileExists / FolderExists / GetFolder report a path of 260+ characters
+   as missing even when it exists (VERIFIED 2026-10-03, Win11 + LongPathsEnabled=1: 259 chars seen, 260 not; a
+   staged 261-char Security.evtx read as missing beside a 259-char System.evtx), and Velociraptor / KAPE
+   collection paths routinely exceed that. The same FSO calls DO see such a path through its \\?\ extended-length
+   form, so a long path is re-checked that way (lpKind). An operator-given source that even the \\?\ form cannot
+   see is still trusted: a note is logged and the long-path-aware engine reports a genuine miss. Guessed sources
+   (a log beside the hive, the hive above a log) are taken only when seen - from the dir /s /b enumeration, FSO
+   or its \\?\ form - never on trust, so a wrong guess cannot break an otherwise good run. */
 var MAXP=259;
 function isLongPath(p){ return String(p||"").length>MAXP; }
+function lpForm(p){ p=String(p||"").replace(/\//g,"\\");
+  if(/^[A-Za-z]:\\/.test(p)) return "\\\\?\\"+p;
+  if(/^\\\\[^\\?.]/.test(p)) return "\\\\?\\UNC\\"+p.substring(2);
+  return ""; }
+function lpKind(p){ var q=lpForm(p); if(!q) return "";   // "f" file / "d" folder / "" not seen, through the \\?\ form
+  try{ var fso=new ActiveXObject("Scripting.FileSystemObject"); if(fso.FileExists(q)) return "f"; if(fso.FolderExists(q)) return "d"; }catch(e){}
+  return ""; }
+function inputSeen(p, wantDir, what){
+  if(wantDir ? folderExists(p) : fileExists(p)) return true;
+  if(!isLongPath(p)) return false;
+  var k=lpKind(p);
+  if(k && k!==(wantDir?"d":"f")) return false;   // it exists, but as the other kind
+  appendLog("Note: the "+what+" path is "+String(p).length+" characters (over MAX_PATH) - "+(k
+    ? "verified through its \\\\?\\ extended-length form."
+    : "this app cannot verify it; the engine reads it and reports it if it is really missing: "+p));
+  return true; }
+function fileSeen(p){ return fileExists(p) || (isLongPath(p) && lpKind(p)==="f"); }   // verified only - for sibling guesses, never trusted blind
 function inListCI(p, list){ var l=String(p).toLowerCase(); list=list||[]; for(var i=0;i<list.length;i++){ if(String(list[i]).toLowerCase()===l) return true; } return false; }
-function srcSeen(p, list){ return fileExists(p) || inListCI(p, list) || (isLongPath(p) && !(list && list.length)); }
+function srcSeen(p, list){ return inListCI(p, list) || fileSeen(p); }
 function srcOk(p, what){
-  if(fileExists(p)) return true;
-  if(isLongPath(p)){ appendLog("Note: the "+what+" path is "+String(p).length+" characters (over MAX_PATH) - this app cannot verify it; the engine reads it and reports it if it is really missing: "+p); return true; }
+  if(inputSeen(p, false, what)) return true;
   setStatus(what+" not found: "+p,"err"); return false;
 }
 function pairLogs(hive, sysList, secList, root){
@@ -986,8 +1006,9 @@ function locateSources(input, cb){
   input=trimStr(input||"");
   HIVE_CANDS=[]; LOG_CANDS={sys:[], sec:[], root:""}; fillHiveSel([]);
   if(!input){ if(cb) cb(false); return; }
-  var fso=new ActiveXObject("Scripting.FileSystemObject");
-  if(fso.FileExists(input) || (isLongPath(input) && !fso.FolderExists(input) && /(\.evtx|\.csv|\\system)$/i.test(input))){
+  var fso=new ActiveXObject("Scripting.FileSystemObject"), lng=isLongPath(input) && !fso.FileExists(input) && !fso.FolderExists(input),
+      lk=lng?lpKind(input):"";   // FSO cannot see a 260+ char path: ask its \\?\ form
+  if(fso.FileExists(input) || lk==="f" || (lng && !lk && /(\.evtx|\.csv|\\system)$/i.test(input))){
     var b=baseName(input).toLowerCase(), d=parentDir(input);
     if(/\.csv$/.test(b)){ if(cb) cb(false); return; }
     if(/\.evtx$/.test(b)){
@@ -997,7 +1018,7 @@ function locateSources(input, cb){
     } else { setSrc("hivePath",input); pairLogs(input,[],[],""); }
     hostGuessFrom(input); srcSummary(); if(cb) cb(true); return;
   }
-  if(!fso.FolderExists(input)){ setStatus("Input not found: "+input,"err"); if(cb) cb(false); return; }
+  if(!inputSeen(input, true, "input folder")){ setStatus("Input not found: "+input,"err"); if(cb) cb(false); return; }
   setStatus("Locating the SYSTEM hive and event logs under "+input+"\u2026","muted");
   var lst=fso.GetSpecialFolder(2)+"\\svcan_loc_"+uid()+".lst";
   var ctx=runBatAsync([
