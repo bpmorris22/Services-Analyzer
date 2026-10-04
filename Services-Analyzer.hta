@@ -303,7 +303,7 @@ function bootLog(msg){
 window.onerror=function(msg,url,line){ bootLog("ONERROR line "+line+": "+msg); return false; };
 bootLog("script top-level reached");
 
-var APP_VERSION = "0.2.2";
+var APP_VERSION = "0.2.3";
 var APP_NAME = "Services-Analyzer";      // output folder _Processed\<host>\Services-Analyzer (no -Wrapper suffix to strip)
 var KNOWN_LATEST_RECMD = "2026.5.0";     // EZ site CalVer, verified 2026-07-11 (exe --version still banners SemVer 2.0.0.0)
 var RECMD_ZIP_URL = "https://download.ericzimmermanstools.com/RECmd.zip";       // official EZ mirror (net4; family default - folder-shaped tool)
@@ -1012,9 +1012,13 @@ function lpFolder(dir){ var fso=new ActiveXObject("Scripting.FileSystemObject"),
   try{ if(fso.FolderExists(dir)) return fso.GetFolder(dir); }catch(e2){}
   return null; }
 function lpTemp(){ return new ActiveXObject("Scripting.FileSystemObject").GetSpecialFolder(2)+"\\svcan_lp_"+uid()+".tmp"; }
-/* byte-exact copy that reaches 260+ char paths. Started directly (Unicode command line), not from a .bat */
-function lpCopy(src, dst){ var rc=-1;
-  try{ rc=new ActiveXObject("WScript.Shell").Run('cmd /d /v:off /c copy /y /b "'+lpIO(src)+'" "'+lpIO(dst)+'"', 0, true); }catch(e){}
+/* byte-exact copy that reaches 260+ char paths. Started directly (Unicode command line), not from a .bat.
+   WScript.Shell.Run and cmd both expand %NAME% (and cmd's %CD% / %VAR:~n% forms) even inside quotes, and neither
+   has an escape for it - so a command holding two or more "%" could name a different file than the one asked for.
+   Such a copy is refused: a read then takes the ANSI fallback below (literal path), a write reports the failure. */
+function lpCopy(src, dst){ var rc=-1, cmd='cmd /d /v:off /c copy /y /b "'+lpIO(src)+'" "'+lpIO(dst)+'"';
+  if(/%[^%]*%/.test(cmd)) return false;
+  try{ rc=new ActiveXObject("WScript.Shell").Run(cmd, 0, true); }catch(e){}
   return rc===0 && fileSeen(dst); }
 function readUtf8Long(path){
   var fso=new ActiveXObject("Scripting.FileSystemObject"), tmp=lpTemp(), copied=false;
@@ -1142,7 +1146,7 @@ function startRunBat(R, recOnly){
   if(R.hive) steps++; if(!recOnly){ if(R.sys) steps++; if(R.sec) steps++; }
   var L=["set DOTNET_ROLL_FORWARD=Major", 'if not exist "'+bout+'" mkdir "'+bout+'"',
     "echo Services-Analyzer is processing - this window closes automatically when finished.",
-    "echo Output: "+bout, "echo."];
+    'echo Output: "'+bout+'"', "echo."];   // quoted: an unquoted & in a folder name would start a second command
   L.push('echo ===STEP:RECMD===> "__LOG__"');
   if(R.hive){ n++; L.push("echo ["+n+"/"+steps+"] RECmd - SYSTEM hive, Services plugin"+(R.nl?" - retry with --nl, no log replay":""));
     L.push('"'+batEsc(EXE)+'" --bn "'+batEsc(argSafePath(R.reb))+'" -f "'+batEsc(argSafePath(R.hive))+'" --csv "'+bout+'"'+(R.nl?" --nl":"")+' >> "__LOG__" 2>&1'); }
@@ -1356,7 +1360,7 @@ function loadAnyCsv(path){
   if(gi(c,"HivePath")>=0 && gi(c,"KeyPath")>=0 && gi(c,"PluginDetailFile")>=0){
     var det=detailFor(path, c);
     if(det){ loadRunSet({dir:parentDir(path), batch:path, detail:det}, baseName(path), {batch:c}); return; }
-    LOADED_CSV_DIR=parentDir(path); ingestGeneric(c.raw, c.raw[0], baseName(path)); setStatus("RECmd batch CSV loaded as a plain table - its Services plugin detail CSV was not found","warn"); return;
+    ingestGeneric(c.raw, c.raw[0], baseName(path)); LASTOUTDIR=LOADED_CSV_DIR=parentDir(path); setStatus("RECmd batch CSV loaded as a plain table - its Services plugin detail CSV was not found","warn"); return;
   }
   if(gi(c,"EventId")>=0 && gi(c,"Payload")>=0){
     var is4697=false, ie=gi(c,"EventId");
@@ -1365,11 +1369,12 @@ function loadAnyCsv(path){
     if(is4697){ s2.sec=path; pre.sec=c; } else { s2.sys=path; pre.sys=c; }
     loadRunSet(s2, baseName(path), pre); return;
   }
-  LOADED_CSV_DIR=parentDir(path);
   ingestGeneric(c.raw, c.raw[0], baseName(path));
+  LASTOUTDIR=LOADED_CSV_DIR=parentDir(path);   // a plain-table CSV exports next to itself, not into the previous run's folder
 }
 /* returns true when the run is on screen. The export / summary targets (LASTOUTDIR, LOADED_CSV_DIR) move only
-   then: a read failure keeps the previous view AND its folder; an empty load clears the view (ingestServices). */
+   then: a read failure keeps the previous view AND its folder; an empty load clears the view (ingestServices).
+   A plain-table load (loadAnyCsv -> ingestGeneric) moves both to the CSV's own folder once it is on screen. */
 function loadRunSet(set, label, pre){
   pre=pre||{};
   var parts={}, keys=["detail","batch","sys","sec"], k="";
@@ -1454,10 +1459,12 @@ function typeClass(label){ return /driver|adapter|recognizer/i.test(String(label
    language - "auto start" on English Windows, "\u81EA\u52D5\u555F\u52D5" on Traditional-Chinese Windows (seen in a
    real case 2026-10-04). Only English words and numeric codes used to be understood, so on a non-English host
    LOG-ONLY services showed raw local words and missed start-dependent logic (AUTOSTART, Start chips, DEFENSE-OFF via
-   7040). Resolution, most exact first: English / numeric -> the paired 4697's numeric code -> this host's own
-   vocabulary learned during the run (7045s and the newest 7040s of services that ARE in the hive, and 7045+4697
-   pairs) -> a seed table of strings verified in real data -> left as logged (unknown; never guessed). */
-var VOC_S={}, VOC_T={};
+   7040). Resolution, most exact first: English / numeric -> the paired 4697's numeric code -> words this host's
+   7045+4697 pairs translate exactly (VOC_SX / VOC_TX) -> a seed table of strings verified in real data -> words
+   inferred from the hive's CURRENT state (7045s and the newest 7040s of services that ARE in the hive; a majority
+   vote, VOC_S / VOC_T) -> left as logged (unknown; never guessed). Inference never outranks exact evidence or the
+   seed: a service whose start type changed after install would otherwise teach the wrong meaning (v0.2.3). */
+var VOC_S={}, VOC_T={}, VOC_SX={}, VOC_TX={};
 var SEED_START={"\u81EA\u52D5\u555F\u52D5":"Automatic", "\u6307\u5B9A\u555F\u52D5":"Manual"};    // zh-TW "auto start" / "demand start"
 var SEED_TYPE={"\u4F7F\u7528\u8005\u6A21\u5F0F\u670D\u52D9":"user mode service"};                 // zh-TW "user mode service"
 function vkey(s){ return trimStr(String(s||"")).toLowerCase(); }
@@ -1466,24 +1473,27 @@ function typeKnown(t){ var l=typeLabel(t); return /driver|adapter|recognizer|ser
 function vote(m,k,v,w){ if(!k || !v) return; var e=mget(m,k); if(!e){ e={}; mset(m,k,e); } e["#"+v]=(e.hasOwnProperty("#"+v)?e["#"+v]:0)+w; }
 function vbest(m,k){ var e=mget(m,k); if(!e) return ""; var b="", bn=0, x; for(x in e){ if(e.hasOwnProperty(x) && e[x]>bn){ bn=e[x]; b=x.substring(1); } } return b; }
 function mapStart(raw, alt){ var k=vkey(raw);
-  return startStrict(raw) || startStrict(alt) || vbest(VOC_S,k) || (SEED_START.hasOwnProperty(k)?SEED_START[k]:""); }
-function mapType(raw, alt, img){ var k=vkey(raw), t=typeKnown(raw) || typeKnown(alt) || vbest(VOC_T,k) || (SEED_TYPE.hasOwnProperty(k)?SEED_TYPE[k]:"");
+  return startStrict(raw) || startStrict(alt) || vbest(VOC_SX,k) || (SEED_START.hasOwnProperty(k)?SEED_START[k]:"") || vbest(VOC_S,k); }
+function mapType(raw, alt, img){ var k=vkey(raw), t=typeKnown(raw) || typeKnown(alt) || vbest(VOC_TX,k) || (SEED_TYPE.hasOwnProperty(k)?SEED_TYPE[k]:"") || vbest(VOC_T,k);
   if(!t && trimStr(raw) && /\.sys"?$/i.test(trimStr(String(img||"")))) t="KernelDriver (inferred from the .sys image)";
   return t; }
 function isLocalWord(raw){ return !!trimStr(String(raw||"")) && !startStrict(raw) && !typeKnown(raw); }
 /* display: English, with the word as logged in brackets when it was a local-language word */
 function startShown(raw, alt){ var m=mapStart(raw,alt), r=trimStr(String(raw||""));
   return m ? (m+(isLocalWord(raw)?(" ("+r+")"):"")) : (r||"?"); }
-/* learn this host's words: 7045s of installs joined to a hive service (and 7045+4697 pairs), plus each hive
-   service's newest 7040 (its "to" should equal the hive's current start). A pair is exact (weight 3). */
+/* learn this host's words. Exact: a 7045+4697 pair (the 4697 logs the same install as numeric codes). Inferred:
+   a 7045 joined to a hive service, voting the hive's CURRENT start - only when no 7040 shows the start type
+   changing at or after that install - and each hive service's newest 7040 (its "to" should equal the current start). */
 function learnVocab(installs, recs){
-  VOC_S={}; VOC_T={};
-  var i, k, it, e, r, lc;
+  VOC_S={}; VOC_T={}; VOC_SX={}; VOC_TX={};
+  var i, k, it, e, r, lc, moved;
   for(i=0;i<installs.length;i++){ it=installs[i]; e=it.ev; if(e.id!==7045) continue;
-    if(isLocalWord(e.start)){ if(it.pair) vote(VOC_S,vkey(e.start),startStrict(it.pair.start),3);
-      if(it.rec && it.rec.src!=="LOG-ONLY") vote(VOC_S,vkey(e.start),startStrict(it.rec.start),1); }
-    if(isLocalWord(e.stype)){ if(it.pair) vote(VOC_T,vkey(e.stype),typeKnown(it.pair.stype),3);
-      if(it.rec && it.rec.src!=="LOG-ONLY") vote(VOC_T,vkey(e.stype),typeKnown(it.rec.type),1); } }
+    r=(it.rec && it.rec.src!=="LOG-ONLY") ? it.rec : null;
+    if(isLocalWord(e.start)){ if(it.pair) vote(VOC_SX,vkey(e.start),startStrict(it.pair.start),1);
+      moved=false; if(r && r.chg){ for(k=0;k<r.chg.length;k++){ if(r.chg[k].ms>=e.ms){ moved=true; break; } } }
+      if(r && !moved) vote(VOC_S,vkey(e.start),startStrict(r.start),1); }
+    if(isLocalWord(e.stype)){ if(it.pair) vote(VOC_TX,vkey(e.stype),typeKnown(it.pair.stype),1);
+      if(r) vote(VOC_T,vkey(e.stype),typeKnown(r.type),1); } }
   for(i=0;i<recs.length;i++){ r=recs[i]; if(!r.chg || r.src==="LOG-ONLY") continue; lc=null;
     for(k=0;k<r.chg.length;k++){ if(!lc || r.chg[k].ms>=lc.ms) lc=r.chg[k]; }
     if(lc && isLocalWord(lc.to)) vote(VOC_S,vkey(lc.to),startStrict(r.start),1); }
@@ -1507,7 +1517,8 @@ function parseDlls(s){ s=trimStr(String(s||"")); if(!s) return [];
 /* vendor recovery programs ("cmd.exe /C %windir%\NvContainerRecovery.bat ...", NVIDIA) run a .bat that lives
    under Windows / Program Files / DriverStore - not LOLBin abuse. FailureCommand only: a service ImagePath that
    runs cmd /c on a .bat in %SYSTEMROOT% is exactly what smbexec does. */
-function vendorRecoveryBat(c){ return baseName(c.binL)==="cmd.exe" && /^\/c\s+"?[a-z]:\\(windows|program files( \(x86\))?)\\[^"&|<>]*?\.(bat|cmd)("|\s|$)/i.test(c.args); }
+function vendorRecoveryBat(c){ return baseName(c.binL)==="cmd.exe" && /^\/c\s+"?[a-z]:\\(windows|program files( \(x86\))?)\\[^"&|<>]*?\.(bat|cmd)("|\s|$)/i.test(c.args)
+  && !/[&|<>^\r\n]/.test(c.args); }   // one script, nothing chained after it ("... .bat & powershell ..." is not exempt)
 function okDrv(bL){ return /^[a-z]:\\windows\\system32\\drivers\\/.test(bL) || bL.indexOf("\\driverstore\\")>=0 || /^[a-z]:\\program files( \(x86\))?\\/.test(bL) || bL.indexOf("\\windows defender\\platform\\")>=0; }
 /* random-looking names (Impacket / Metasploit style). Tuned 2026-10-03: 0 hits on 932 real service names from
    two hives, hits a real Impacket smbexec service name; ~10-26% recall on random strings - a +1 hint, not a detector. */
@@ -2418,6 +2429,12 @@ function setMode(m){
 
 /* ---------- export / copy ---------- */
 function cq(v){ v=(v==null)?"":String(v); return /[",\r\n]/.test(v)?('"'+v.replace(/"/g,'""')+'"'):v; }
+/* export cells: service names, paths, accounts and descriptions come from the evidence, and a spreadsheet runs a
+   cell that starts with = + - @ (or tab / CR) as a formula even when it is quoted. Such a cell gets a leading ' so
+   it opens as text; plain numbers are left alone. Exports only - cq stays the exact serializer. */
+function xq(v){ v=(v==null)?"":String(v);
+  if(/^[=+\-@\t\r]/.test(v) && !/^[+\-]?\d+(\.\d+)?$/.test(v)) v="'"+v;
+  return cq(v); }
 function nowStamp(){ var d=new Date(); function p(x){return (x<10?"0":"")+x;}
   return d.getFullYear()+""+p(d.getMonth()+1)+p(d.getDate())+"_"+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds()); }
 function writeExport(prefix, lines, n, what){
@@ -2434,26 +2451,26 @@ function exportView(){
   if(VIEW==="time"){
     lines=["Time_UTC,Kind,Service,Detail,Count,Score,Tags"];
     for(i=0;i<rows.length;i++){ var t=rows[i];
-      lines.push([cq(t.ts),cq(t.kind),cq(t.svc),cq(t.detail),cq(t.count),cq(t.rec?t.rec.score:""),cq(t.rec?t.rec.tags.join("; "):"")].join(",")); }
+      lines.push([xq(t.ts),xq(t.kind),xq(t.svc),xq(t.detail),xq(t.count),xq(t.rec?t.rec.score:""),xq(t.rec?t.rec.tags.join("; "):"")].join(",")); }
     writeExport("services_timeline_export_", lines, rows.length, "timeline items"); return;
   }
   if(VIEW==="acct"){
     lines=["Account,Services,Autostart,Drivers,Suspicious,MaxScore,NewestKeyWrite_UTC"];
-    for(i=0;i<rows.length;i++){ var g=rows[i]; lines.push([cq(g.acct),cq(g.n),cq(g.auto),cq(g.drv),cq(g.sus),cq(g.maxScore),cq(g.newest)].join(",")); }
+    for(i=0;i<rows.length;i++){ var g=rows[i]; lines.push([xq(g.acct),xq(g.n),xq(g.auto),xq(g.drv),xq(g.sus),xq(g.maxScore),xq(g.newest)].join(",")); }
     writeExport("services_accounts_export_", lines, rows.length, "accounts"); return;
   }
   lines=["Name,DisplayName,Description,StartMode,ServiceType,Account,ImagePath,Binary,ServiceDLL,FailureCommand,ServiceMain,Group,RequiredPrivileges,KeyLastWrite_UTC,ParametersKeyLastWrite_UTC,ControlSet,Source,InstallCount,FirstInstall_UTC,LastInstall_UTC,InstalledBy,StartTypeChanges,Tags,Context,Score,Suspicious,Reasons"];
   for(i=0;i<rows.length;i++){ var r=rows[i];
-    lines.push([cq(r.name),cq(r.disp),cq(r.descr),cq(r.start),cq(r.type),cq(r.acctDisp),cq(r.image),cq(r.main.bin),cq(r.dllDisp),cq(r.failCmd),cq(r.svcMain),cq(r.group),cq(r.privs),
-      cq(r.lw),cq(r.plw),cq(r.cs?("ControlSet00"+r.cs):""),cq(r.src),cq(r.inst?r.inst.count:0),cq(r.inst?r.inst.first:""),cq(r.inst?r.inst.last:""),cq(r.instBy),
-      cq(r.chg?r.chg.length:0),cq(r.tags.join("; ")),cq(r.ctx.join("; ")),cq(r.score),cq(r.sus?"Yes":"No"),cq(r.reasons.join("; "))].join(",")); }
+    lines.push([xq(r.name),xq(r.disp),xq(r.descr),xq(r.start),xq(r.type),xq(r.acctDisp),xq(r.image),xq(r.main.bin),xq(r.dllDisp),xq(r.failCmd),xq(r.svcMain),xq(r.group),xq(r.privs),
+      xq(r.lw),xq(r.plw),xq(r.cs?("ControlSet00"+r.cs):""),xq(r.src),xq(r.inst?r.inst.count:0),xq(r.inst?r.inst.first:""),xq(r.inst?r.inst.last:""),xq(r.instBy),
+      xq(r.chg?r.chg.length:0),xq(r.tags.join("; ")),xq(r.ctx.join("; ")),xq(r.score),xq(r.sus?"Yes":"No"),xq(r.reasons.join("; "))].join(",")); }
   writeExport("services_export_", lines, rows.length, "services");
 }
 function exportGeneric(){
   var rows=window.__viewRows||[];
   if(!GHEAD||!rows.length){ setStatus("Nothing to export","err"); return; }
-  var lines=[], hd=[]; for(var c=0;c<GHEAD.length;c++) hd.push(cq(GHEAD[c])); lines.push(hd.join(","));
-  for(var i=0;i<rows.length;i++){ var rw=rows[i], cells=[]; for(var c2=0;c2<GHEAD.length;c2++) cells.push(cq(c2<rw.length?rw[c2]:"")); lines.push(cells.join(",")); }
+  var lines=[], hd=[]; for(var c=0;c<GHEAD.length;c++) hd.push(xq(GHEAD[c])); lines.push(hd.join(","));
+  for(var i=0;i<rows.length;i++){ var rw=rows[i], cells=[]; for(var c2=0;c2<GHEAD.length;c2++) cells.push(xq(c2<rw.length?rw[c2]:"")); lines.push(cells.join(",")); }
   writeExport("filtered_export_", lines, rows.length, "rows");
 }
 function copyNotes(){
