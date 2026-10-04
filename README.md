@@ -66,6 +66,7 @@ In the [DFIR-Windows-Artifact-Finder](https://github.com/bpmorris22/DFIR-Windows
 
 - All timestamps are UTC. Live `C:\Windows\System32\config` hives are exclusively locked — collect first, then process the copy. A dirty hive without its `.LOG1/.LOG2` is retried automatically with `--nl`.
 - 4697 needs "Security System Extension" auditing; without it installers show as SIDs.
+- Non-English hosts: 7045 / 7040 log start and service types as words in the host's language. They are resolved language-neutrally — the paired 4697's numeric code, then the host's own words learned from services that are both in the hive and in the logs — and shown in English with the logged word in brackets. A word that can't be resolved is shown as logged and never counts as autostart.
 - Binaries are not hashed — pivot to AmcacheParser-Wrapper / MFTECmd-Wrapper for hashes and file times, and to Login Activity Triage for logon sessions.
 - RECmd and EvtxECmd are Eric Zimmerman's tools and are downloaded from their official source, not bundled.
 

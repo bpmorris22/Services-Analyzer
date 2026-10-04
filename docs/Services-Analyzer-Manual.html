@@ -73,8 +73,8 @@
       <span class="pill">Author: Ben Morris</span>
       <span class="pill">github.com/bpmorris22/Services-Analyzer</span>
       <span class="pill">MIT licence</span>
-      <span class="pill">App v0.2.0</span>
-      <span class="pill">Manual updated 2026-10-03</span>
+      <span class="pill">App v0.2.1</span>
+      <span class="pill">Manual updated 2026-10-04</span>
       <span class="pill">All screenshots use synthetic data (host WKS-0142, domain CONTOSO)</span>
     </div>
   </div>
@@ -253,6 +253,7 @@
   <li><b>LastWrite is not install time.</b> Anything that changes a value under the key updates it; servicing rewrites hundreds of keys at once (BULK). Use the install events for "when".</li>
   <li><b>Display names</b> stored as resource strings (<code>@%SystemRoot%\…,-2</code>) can't be resolved offline — those services join on key name, parentheses or image path instead.</li>
   <li><b>4697 needs auditing</b>; without it installers appear as SIDs (named when any 4697 for that SID exists).</li>
+  <li><b>Non-English hosts.</b> Event 7045 stores the start type and service type — and 7040 its old / new start type — as <i>words in the host's display language</i> (<code>&#x81EA;&#x52D5;&#x555F;&#x52D5;</code> = auto start on Traditional-Chinese Windows), not as numbers. The app resolves them language-neutrally, most exact first: the paired 4697's numeric code → the host's own words, learned from services that are both in the hive and in the logs → a small table of strings seen in real cases. They are shown in English with the logged word in brackets, e.g. <code>Automatic (&#x81EA;&#x52D5;&#x555F;&#x52D5;)</code>. A word it cannot resolve is shown as logged and never counts as autostart; a type word it cannot resolve on a <code>.sys</code> image is treated as a driver.</li>
   <li><b>LOG-ONLY ≠ malicious</b> — vendor updaters create and delete services too; read it with the image and installer.</li>
   <li>Binaries are not hashed (they are rarely collected) — pivot to AmcacheParser-Wrapper or MFTECmd-Wrapper for SHA1 and file timestamps; for logon sessions and lateral movement use Login Activity Triage.</li>
   <li>With no hive loaded, a 7045 and its 4697 that share an image with another install in the same two seconds — and whose names don't tie — are shown as two log-only records rather than risk joining the wrong pair.</li>

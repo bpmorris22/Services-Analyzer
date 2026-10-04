@@ -303,7 +303,7 @@ function bootLog(msg){
 window.onerror=function(msg,url,line){ bootLog("ONERROR line "+line+": "+msg); return false; };
 bootLog("script top-level reached");
 
-var APP_VERSION = "0.2.0";
+var APP_VERSION = "0.2.1";
 var APP_NAME = "Services-Analyzer";      // output folder _Processed\<host>\Services-Analyzer (no -Wrapper suffix to strip)
 var KNOWN_LATEST_RECMD = "2026.5.0";     // EZ site CalVer, verified 2026-07-11 (exe --version still banners SemVer 2.0.0.0)
 var RECMD_ZIP_URL = "https://download.ericzimmermanstools.com/RECmd.zip";       // official EZ mirror (net4; family default - folder-shaped tool)
@@ -1394,6 +1394,45 @@ function typeLabel(t){ t=trimStr(String(t||""));
   if(/^0x[0-9a-f]+$/i.test(t)) return typeFromNum(parseInt(t,16));
   return t; }
 function typeClass(label){ return /driver|adapter|recognizer/i.test(String(label||""))?"driver":"win32"; }
+/* ---------- localized SCM words ----------
+   7045 (StartType / ServiceType) and 7040 (param2 / param3) are written as WORDS in the logging host's display
+   language - "auto start" on English Windows, "\u81EA\u52D5\u555F\u52D5" on Traditional-Chinese Windows (seen in a
+   real case 2026-10-04). Only English words and numeric codes used to be understood, so on a non-English host
+   LOG-ONLY services showed raw local words and missed start-dependent logic (AUTOSTART, Start chips, DEFENSE-OFF via
+   7040). Resolution, most exact first: English / numeric -> the paired 4697's numeric code -> this host's own
+   vocabulary learned during the run (7045s and the newest 7040s of services that ARE in the hive, and 7045+4697
+   pairs) -> a seed table of strings verified in real data -> left as logged (unknown; never guessed). */
+var VOC_S={}, VOC_T={};
+var SEED_START={"\u81EA\u52D5\u555F\u52D5":"Automatic", "\u6307\u5B9A\u555F\u52D5":"Manual"};    // zh-TW "auto start" / "demand start"
+var SEED_TYPE={"\u4F7F\u7528\u8005\u6A21\u5F0F\u670D\u52D9":"user mode service"};                 // zh-TW "user mode service"
+function vkey(s){ return trimStr(String(s||"")).toLowerCase(); }
+function startStrict(s){ var n=normStart(s); return startRank(n)<5?n:""; }                       // English / numeric only
+function typeKnown(t){ var l=typeLabel(t); return /driver|adapter|recognizer|service|process/i.test(l)?l:""; }
+function vote(m,k,v,w){ if(!k || !v) return; var e=mget(m,k); if(!e){ e={}; mset(m,k,e); } e["#"+v]=(e.hasOwnProperty("#"+v)?e["#"+v]:0)+w; }
+function vbest(m,k){ var e=mget(m,k); if(!e) return ""; var b="", bn=0, x; for(x in e){ if(e.hasOwnProperty(x) && e[x]>bn){ bn=e[x]; b=x.substring(1); } } return b; }
+function mapStart(raw, alt){ var k=vkey(raw);
+  return startStrict(raw) || startStrict(alt) || vbest(VOC_S,k) || (SEED_START.hasOwnProperty(k)?SEED_START[k]:""); }
+function mapType(raw, alt, img){ var k=vkey(raw), t=typeKnown(raw) || typeKnown(alt) || vbest(VOC_T,k) || (SEED_TYPE.hasOwnProperty(k)?SEED_TYPE[k]:"");
+  if(!t && trimStr(raw) && /\.sys"?$/i.test(trimStr(String(img||"")))) t="KernelDriver (inferred from the .sys image)";
+  return t; }
+function isLocalWord(raw){ return !!trimStr(String(raw||"")) && !startStrict(raw) && !typeKnown(raw); }
+/* display: English, with the word as logged in brackets when it was a local-language word */
+function startShown(raw, alt){ var m=mapStart(raw,alt), r=trimStr(String(raw||""));
+  return m ? (m+(isLocalWord(raw)?(" ("+r+")"):"")) : (r||"?"); }
+/* learn this host's words: 7045s of installs joined to a hive service (and 7045+4697 pairs), plus each hive
+   service's newest 7040 (its "to" should equal the hive's current start). A pair is exact (weight 3). */
+function learnVocab(installs, recs){
+  VOC_S={}; VOC_T={};
+  var i, k, it, e, r, lc;
+  for(i=0;i<installs.length;i++){ it=installs[i]; e=it.ev; if(e.id!==7045) continue;
+    if(isLocalWord(e.start)){ if(it.pair) vote(VOC_S,vkey(e.start),startStrict(it.pair.start),3);
+      if(it.rec && it.rec.src!=="LOG-ONLY") vote(VOC_S,vkey(e.start),startStrict(it.rec.start),1); }
+    if(isLocalWord(e.stype)){ if(it.pair) vote(VOC_T,vkey(e.stype),typeKnown(it.pair.stype),3);
+      if(it.rec && it.rec.src!=="LOG-ONLY") vote(VOC_T,vkey(e.stype),typeKnown(it.rec.type),1); } }
+  for(i=0;i<recs.length;i++){ r=recs[i]; if(!r.chg || r.src==="LOG-ONLY") continue; lc=null;
+    for(k=0;k<r.chg.length;k++){ if(!lc || r.chg[k].ms>=lc.ms) lc=r.chg[k]; }
+    if(lc && isLocalWord(lc.to)) vote(VOC_S,vkey(lc.to),startStrict(r.start),1); }
+}
 function isUserPath(pL){ if(!pL) return false;
   if(pL.indexOf("\\programdata\\microsoft\\")>=0) return false;   // vendor ProgramData (incl. the Defender platform) - the rule targets NON-vendor ProgramData
   for(var i=0;i<USERPATHS.length;i++){ if(pL.indexOf(USERPATHS[i])>=0) return true; } return false; }
@@ -1457,7 +1496,8 @@ function newRec(o){
   var r={name:String(o.name||""), disp:trimStr(o.disp||""), descr:o.descr||"", start:o.start||"", type:o.type||"", lw:o.lw||"", plw:o.plw||"",
     group:o.group||"", image:o.image||"", dll:trimStr(o.dll||""), privs:o.privs||"", acct:trimStr(o.acct||""), failCmd:trimStr(o.failCmd||""),
     svcMain:trimStr(o.svcMain||""), cs:o.cs||0, keyPath:o.keyPath||"", src:o.src||"HIVE", oldSet:false, csdiff:null, inst:null, chg:null, fails:null,
-    toDisabled:false, bulk:false, recent:false, no7045:false, nosvc:false, tags:[], ctx:[], reasons:[], score:0, sus:false};
+    toDisabled:false, bulk:false, recent:false, no7045:false, nosvc:false, tags:[], ctx:[], reasons:[], score:0, sus:false,
+    startRaw:"", typeRaw:""};   // the local-language word as logged (LOG-ONLY records on non-English hosts)
   r.nameL=r.name.toLowerCase(); r.lwMs=msOf(r.lw); r.lwDay=dayOf(r.lw); r.cmdKey=normCmd(r.image);
   return r;
 }
@@ -1629,24 +1669,33 @@ function buildModel(det, bat, sys, sec){
     }
     addInstall(lo,it);
   }
-  /* a LOG-ONLY record shows its NEWEST install's configuration. Repeat installs usually arrive through byName /
-     byDisp (resolveInstall), not the creation branch above, so this runs over the final install list. Every
-     image is still scored (finalizeRec). */
-  for(k in logOnly){ if(!logOnly.hasOwnProperty(k)) continue;
-    var lr=logOnly[k], nw=null;
-    for(i=0;i<lr.inst.list.length;i++){ var ie=lr.inst.list[i].ev; if(!nw || ie.ms>=nw.ms) nw=ie; }
-    if(!nw) continue;
-    if(trimStr(nw.image||"")) lr.image=nw.image;
-    var nst=normStart(nw.start); if(nst) lr.start=nst;
-    if(trimStr(nw.acct||"")) lr.acct=trimStr(nw.acct);
-    var nty=typeLabel(nw.stype); if(nty) lr.type=nty;
-    lr.cmdKey=normCmd(lr.image); }
   // 5. start-type changes and SCM failures attach by key name (7040 param4 / failure Binary), else display name
   for(i=0;i<chg.length;i++){ var c7=chg[i], t7=mget(byName,String(c7.name).toLowerCase())||(c7.disp?mget(byDisp,c7.disp.toLowerCase()):null);
-    c7.recRef=t7; if(t7){ if(!t7.chg) t7.chg=[]; t7.chg.push(c7); if(/disabled/i.test(c7.to)) t7.toDisabled=true; } }
+    c7.recRef=t7; if(t7){ if(!t7.chg) t7.chg=[]; t7.chg.push(c7); } }
   for(i=0;i<fails.length;i++){ var f7=fails[i], t8=(f7.name?mget(byName,f7.name.toLowerCase()):null)
       || (f7.disp?(mget(byDisp,f7.disp.toLowerCase())||mget(byName,f7.disp.toLowerCase())):null);
     f7.recRef=t8; if(t8){ if(!t8.fails) t8.fails=[]; t8.fails.push(f7); } }
+  // 5b. this host's own words for start / type (non-English Windows logs them localized) - see learnVocab()
+  learnVocab(installs, SVCS);
+  for(i=0;i<chg.length;i++){ if(chg[i].recRef && mapStart(chg[i].to,"")==="Disabled") chg[i].recRef.toDisabled=true; }
+  /* a LOG-ONLY record shows its NEWEST install's configuration. Repeat installs usually arrive through byName /
+     byDisp (resolveInstall), not the creation branch above, so this runs over the final install list. Every
+     image is still scored (finalizeRec). Start / type resolve language-neutrally (mapStart / mapType); the word
+     as logged is kept for display when it was a local-language word. */
+  for(k in logOnly){ if(!logOnly.hasOwnProperty(k)) continue;
+    var lr=logOnly[k], nwi=null;
+    for(i=0;i<lr.inst.list.length;i++){ var li=lr.inst.list[i]; if(!nwi || li.ev.ms>=nwi.ev.ms) nwi=li; }
+    if(!nwi) continue;
+    var nw=nwi.ev, np=nwi.pair;
+    if(trimStr(nw.image||"")) lr.image=nw.image;
+    var nst=mapStart(nw.start, np?np.start:"");
+    if(nst){ lr.start=nst; lr.startRaw=isLocalWord(nw.start)?trimStr(nw.start):""; }
+    else if(trimStr(nw.start||"")){ lr.start=trimStr(nw.start); lr.startRaw=""; }      // unknown word: shown as logged, never treated as autostart
+    if(trimStr(nw.acct||"")) lr.acct=trimStr(nw.acct);
+    var nty=mapType(nw.stype, np?np.stype:"", nw.image);
+    if(nty){ lr.type=nty; lr.typeRaw=isLocalWord(nw.stype)?trimStr(nw.stype):""; }
+    else if(trimStr(nw.stype||"")){ lr.type=trimStr(nw.stype); lr.typeRaw=""; }
+    lr.cmdKey=normCmd(lr.image); }
   // 6. BULK (servicing rewrites), recency anchor, clusters
   var hv=[]; for(i=0;i<SVCS.length;i++){ if(SVCS[i].src!=="LOG-ONLY" && SVCS[i].lwMs) hv.push(SVCS[i]); }
   hv.sort(function(a,b){ return a.lwMs-b.lwMs; });
@@ -1703,7 +1752,7 @@ function buildTimeline(installs, chg, fails, clusters){
   var i, g, k, map={};
   for(i=0;i<installs.length;i++){ var it=installs[i], e=it.ev;
     TL.push({ms:e.ms, ts:e.ts, kind:(e.id===7045?(it.pair?"Install 7045+4697":"Install 7045"):"Install 4697"),
-      svc:it.rec?it.rec.name:(it.keyName||e.name), detail:String(e.name)+" | "+cmdLabel(e.image)+" | start "+(normStart(e.start)||"?")+" | account "+(e.acct||"?")+" | by "+it.who.label,
+      svc:it.rec?it.rec.name:(it.keyName||e.name), detail:String(e.name)+" | "+cmdLabel(e.image)+" | start "+startShown(e.start, it.pair?it.pair.start:"")+" | account "+(e.acct||"?")+" | by "+it.who.label,
       count:1, rec:it.rec||null, inst:it}); }
   // 7040 collapsed per service per day (BITS alone flaps hundreds of times)
   for(i=0;i<chg.length;i++){ var c=chg[i], key=(c.recRef?c.recRef.nameL:String(c.name).toLowerCase())+"|7040|"+dayOf(c.ts);
@@ -1957,8 +2006,8 @@ var COLS=[
   {h:"Tags", sk:function(r){return -r.score;}, cell:function(r){return '<td class="first">'+tagHtml(r)+'</td>';}},
   {h:"Name", sk:function(r){return r.nameL;}, cell:function(r){return '<td class="mono" title="'+esc(r.keyPath||r.name)+'">'+esc(r.name)+'</td>';}},
   {h:"Display name", sk:function(r){return r.disp.toLowerCase();}, cell:function(r){return '<td title="'+esc(r.disp)+'">'+esc(clip(r.disp,70))+'</td>';}},
-  {h:"Start", sk:function(r){return startRank(r.start);}, cell:function(r){return '<td>'+esc(r.start)+'</td>';}},
-  {h:"Type", sk:function(r){return String(r.type).toLowerCase();}, cell:function(r){return '<td class="muted">'+esc(r.type)+'</td>';}},
+  {h:"Start", sk:function(r){return startRank(r.start);}, cell:function(r){return '<td'+(r.startRaw?(' title="logged as '+esc(r.startRaw)+'"'):'')+'>'+esc(r.start)+'</td>';}},
+  {h:"Type", sk:function(r){return String(r.type).toLowerCase();}, cell:function(r){return '<td class="muted"'+(r.typeRaw?(' title="logged as '+esc(r.typeRaw)+'"'):'')+'>'+esc(r.type)+'</td>';}},
   {h:"Account", sk:function(r){return r.acctDisp.toLowerCase();}, cell:function(r){return '<td class="mono muted lnk" data-user="'+esc(r.acctDisp)+'" title="Run-as account - click to filter. '+esc(r.acctDisp)+'">'+esc(r.acctDisp)+'</td>';}},
   {h:"Binary", sk:function(r){return r.main.binL;}, cell:function(r){return '<td class="mono" title="'+esc(r.main.raw)+'">'+esc(shortPathN(r.main.bin,3))+(r.main.args?(' <span class="muted">'+esc(clip(r.main.args,60))+'</span>'):"")+'</td>';}},
   {h:"ServiceDLL", sk:function(r){return r.dllL;}, cell:function(r){return '<td class="mono" title="'+esc(r.dllDisp)+'">'+esc(shortPathN(r.dlls.length?r.dlls[0]:"",2))+(r.dlls.length>1?' <span class="muted">+'+(r.dlls.length-1)+'</span>':'')+'</td>';}},
@@ -2188,8 +2237,8 @@ function renderDetail(r){
   h+=detRow("Control set", r.cs?("ControlSet00"+r.cs+(r.oldSet?" (NOT the current set)":(META.csCurrent===r.cs?" (current)":""))):"", true);
   h+=detRow("Display name", r.disp, false);
   h+=detRow("Description", r.descr, false);
-  h+=detRow("Start", r.start, true);
-  h+=detRow("Type", r.type, true);
+  h+=detRow("Start", r.start+(r.startRaw?("  (logged as \""+r.startRaw+"\")"):(r.src==="LOG-ONLY" && r.start && startRank(r.start)>4?"  (word not recognised - not treated as autostart)":"")), true);
+  h+=detRow("Type", r.type+(r.typeRaw?("  (logged as \""+r.typeRaw+"\")"):""), true);
   h+=detRow("Account (ObjectName)", r.acct, true);
   h+=detRow("ImagePath", r.image, true);
   h+=detRow("Binary (resolved)", r.main.bin, true);
@@ -2208,11 +2257,11 @@ function renderDetail(r){
     h+=detRow("ImagePath", r.csdiff.image, true)+detRow("ServiceDLL", r.csdiff.dll, true)+detRow("Start", r.csdiff.start, true)+detRow("Key LastWrite", r.csdiff.lw, true)+'</div>'; }
   if(r.inst){ h+='<h3>Install history ('+nf(r.inst.count)+': '+r.inst.n7045+' x 7045, '+r.inst.n4697+' x 4697)</h3><div class="dl">';
     for(i=0;i<r.inst.list.length && i<200;i++){ var it=r.inst.list[i], e=it.ev;
-      h+=evLine([e.ts, (e.id===7045?(it.pair?"7045+4697":"7045"):"4697"), "as \""+e.name+"\"", decodeEnt(e.image), "start "+(normStart(e.start)||"?"), "account "+(e.acct||"?"),
+      h+=evLine([e.ts, (e.id===7045?(it.pair?"7045+4697":"7045"):"4697"), "as \""+e.name+"\"", decodeEnt(e.image), "start "+startShown(e.start, it.pair?it.pair.start:""), "account "+(e.acct||"?"),
         "by "+it.who.label+(it.who.sid && it.who.sid!==it.who.label?(" ("+it.who.sid+")"):""), (it.how?("matched on "+it.how):"")]); }
     h+='</div>'; }
   if(r.chg){ h+='<h3>Start-type changes (7040): '+nf(r.chg.length)+'</h3><div class="dl">';
-    for(i=r.chg.length-1;i>=0 && i>=r.chg.length-200;i--) h+=evLine([r.chg[i].ts, r.chg[i].from+" -> "+r.chg[i].to, "by "+(r.chg[i].sid||"?")]);
+    for(i=r.chg.length-1;i>=0 && i>=r.chg.length-200;i--) h+=evLine([r.chg[i].ts, startShown(r.chg[i].from,"")+" -> "+startShown(r.chg[i].to,""), "by "+(r.chg[i].sid||"?")]);
     h+='</div>'; }
   if(r.fails){ h+='<h3>Crashes / start failures: '+nf(r.fails.length)+'</h3><div class="dl">';
     for(i=0;i<r.fails.length && i<200;i++) h+=evLine([r.fails[i].ts, String(r.fails[i].id), r.fails[i].text]);
